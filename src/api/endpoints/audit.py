@@ -3065,7 +3065,7 @@ def api_export_pdf(
                     "POST-QUANTUM" in _fw_upper or
                     "POST QUANTUM" in _fw_upper or
                     any(
-                        bool(f.get("quantum_status") or f.get("asset_name") or
+                        bool(f.get("quantum_status") or
                              f.get("ca_algorithm") or f.get("key_algorithm") or
                              str(f.get("control_id", "") or "").upper().startswith("PQC"))
                         for f in findings_mapped

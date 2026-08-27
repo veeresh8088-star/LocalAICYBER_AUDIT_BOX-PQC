@@ -2162,7 +2162,7 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                 except Exception:
                     ftext = ""
 
-            actionable, info = parse_tool_file(fname, ftext or "")
+            actionable, info = parse_tool_file(fname, ftext or "", framework="vapt")
 
 
             # parse_tool_file's second return value differs by parser: a list of
@@ -2195,7 +2195,7 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                 
                 if raw_ocr and len(raw_ocr.strip()) > 10:
                     # Pass OCR text to Python tool parsers!
-                    actionable_ocr, info_ocr = parse_tool_file("ocr_" + fname + ".txt", raw_ocr)
+                    actionable_ocr, info_ocr = parse_tool_file("ocr_" + fname + ".txt", raw_ocr, framework="vapt")
                     info_ocr_list = info_ocr if isinstance(info_ocr, list) else []
                     ocr_findings = actionable_ocr + info_ocr_list
                     if ocr_findings:

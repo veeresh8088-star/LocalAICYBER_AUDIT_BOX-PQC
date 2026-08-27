@@ -25,27 +25,49 @@ ALL_PARSERS = [
     PQCParser(),
 ]
 
-def parse_tool_file(filename: str, content: str) -> Tuple[List[Finding], Any]:
+def parse_tool_file(filename: str, content: str, framework: str = "") -> Tuple[List[Finding], Any]:
     """
     Auto-detects file type and dispatches to the appropriate security tool parser.
 
+    Parameters
+    ----------
+    filename : str
+        Name / path of the file being parsed.
+    content : str
+        Extracted text content of the file.
+    framework : str, optional
+        The active audit framework (e.g. "vapt", "pqc", "iso").  When set to
+        "vapt" the PQC binary fast-path is **skipped** so nmap screenshots,
+        Nessus PDFs, and other VAPT evidence files are never misrouted through
+        PQCParser.  Empty string / None falls back to the old behaviour (tries
+        PQCParser for any binary extension) for callers that have not been
+        updated yet.
+
     Detection strategy (in order):
-    1. PDF / DOCX / image files with binary extensions are tried through ALL_PARSERS
-       FIRST (PQCParser.can_parse() returns True for these extensions immediately).
-       If PQCParser claims the file, it extracts text internally and scans it.
-    2. Image files NOT claimed by PQCParser are returned early with [] -- they are
-       visual PoC evidence screenshots with no XML/HTML scanner structure.
-    3. All other files are tried against ALL_PARSERS using content-signature detection.
-    4. If no parser claims the file, NessusParser handles it as a fallback.
+    1. If framework == "vapt": skip the PQC binary fast-path entirely.
+       Images / PDFs are returned as [] so bg_worker's OCR path handles them.
+    2. PDF / DOCX / image files with binary extensions are tried through
+       PQCParser FIRST when framework is PQC (or unspecified).  If PQCParser
+       finds PQC findings, return them directly.  Otherwise fall through.
+    3. Image files NOT claimed by PQCParser are returned early with [] -- they
+       are visual PoC evidence screenshots with no XML/HTML scanner structure.
+    4. All other files are tried against ALL_PARSERS using content-signature
+       detection.
+    5. If no parser claims the file, NessusParser handles it as a fallback.
 
     Returns (actionable_findings, extra_info/inventory).
     """
+    _fw = str(framework or "").strip().lower()
+    _is_vapt_framework = _fw == "vapt"
+
     # ── Stage 1: Binary document fast-path (PDF / DOCX / images) ─────────────
-    # Route to PQCParser FIRST for PQC-relevant binary formats. PQCParser.can_parse()
-    # accepts binary extensions without needing text content. If PQCParser fires and
-    # finds PQC findings, return them directly. Otherwise fall through to VAPT path.
+    # Route to PQCParser FIRST for PQC-relevant binary formats ONLY when the
+    # active framework is PQC (or unknown).  When the caller is running a VAPT
+    # scan, skip this entire block -- nmap screenshots / Nessus PDFs / Burp
+    # reports must never be misclassified as PQC findings simply because they
+    # mention "TLS 1.0" or "RSA" in their OCR text.
     ext_lower = __import__('os').path.splitext(filename.lower())[1]
-    if ext_lower in _PQC_BINARY_EXTENSIONS:
+    if ext_lower in _PQC_BINARY_EXTENSIONS and not _is_vapt_framework:
         pqc_p = ALL_PARSERS[-1]  # PQCParser is always last
         if pqc_p.can_parse(filename, content):
             res = pqc_p.parse(filename, content)

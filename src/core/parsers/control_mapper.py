@@ -448,8 +448,7 @@ def get_actionable_remediation(finding: Finding) -> str:
     _is_pqc = (
         (finding.category or "").upper() in (
             "PQC", "POST-QUANTUM CRYPTOGRAPHY",
-            "ELLIPTIC CURVE CRYPTOGRAPHY (ECC)", "ASYMMETRIC ENCRYPTION (RSA)",
-            "DATABASE TLS CONFIGURATION", "PROTOCOL VERSION"
+            "ELLIPTIC CURVE CRYPTOGRAPHY (ECC)", "ASYMMETRIC ENCRYPTION (RSA)"
         )
         or (finding.control_id or "").upper().startswith("PQC")
         or getattr(finding, "quantum_status", None) is not None

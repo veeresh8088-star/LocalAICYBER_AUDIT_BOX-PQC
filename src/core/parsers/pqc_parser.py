@@ -1501,7 +1501,7 @@ class PQCParser(BaseParser):
                 )
                 return [], []
             print(
-                f"[PQC PARSER] Extracted {len(content)} chars from binary '{filename}' "
+                f"[BINARY TEXT EXTRACTOR] Extracted {len(content)} chars from binary '{filename}' "
                 f"(ext: {ext_lower}).",
                 flush=True,
             )

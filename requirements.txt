@@ -3,16 +3,22 @@ uvicorn[standard]
 python-multipart
 requests
 pdfplumber
+pypdfium2
+pypdf
 sentence-transformers
 pandas
 sqlalchemy
 psycopg2-binary
+pgvector
 openpyxl
 xlrd>=2.0.1
 olefile>=0.46
 python-docx
 python-pptx
 fpdf2
+reportlab
+pyOpenSSL
+cryptography
 pyotp
 bcrypt
 qrcode
@@ -33,4 +39,10 @@ lxml>=5.0.0
 sentry-sdk[fastapi]>=2.0.0
 rank-bm25>=0.2.2
 defusedxml>=0.7.1
+pillow
+torch
+torchvision
+pytesseract
+pytest
+pytest-asyncio
 
