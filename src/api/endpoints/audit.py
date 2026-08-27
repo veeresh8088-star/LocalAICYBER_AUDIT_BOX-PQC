@@ -1487,7 +1487,6 @@ def api_get_findings(request: Request, session_id: str, saved_only: bool = False
             e_val = getattr(f, "evidence_items_json", None) if hasattr(f, "evidence_items_json") else (f.get("evidence_items_json") if isinstance(f, dict) else None)
             if p_val is None: p_val = "[]"
             if e_val is None: e_val = "[]"
-            print(f"[API AUDIT DEBUG] Control {f.control_id} -> policy_items_json={p_val}, evidence_items_json={e_val}", flush=True)
 
             result.append({
                 "id": f.id,
