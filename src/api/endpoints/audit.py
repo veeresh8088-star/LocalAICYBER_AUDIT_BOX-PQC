@@ -103,6 +103,8 @@ class StartAuditRequest(BaseModel):
     custom_evidence: Optional[dict] = None
     custom_documents: Optional[dict] = None
     username: Optional[str] = None
+    is_resume: Optional[bool] = False
+    reset_findings: Optional[bool] = False
 
 class UpdateFindingRequest(BaseModel):
     status: str
@@ -1042,29 +1044,36 @@ def api_start_audit(req: StartAuditRequest, request: Request):
 
             report_framework = report.framework or ""
 
-            # ── STALE CHECKPOINT CLEANUP ───────────────────────────────────────
-            # Discard any leftover checkpoint from a PREVIOUS run on this session
-            # BEFORE the background thread starts. This prevents the old run's
-            # total_controls / selected_sls from bleeding into the new run —
-            # e.g. a prior 4-control crashed session showing "1/4 done" when only
-            # 2 controls are selected this time, or the resume prompt appearing
-            # for a session the user is explicitly starting fresh.
-            # _checkpoint_create() inside the thread also does this, but doing it
-            # here eliminates the race window between API return and thread start.
-            try:
-                _stale_chk_count = db.query(AuditCheckpoint).filter(
-                    AuditCheckpoint.session_id == req.session_id
-                ).delete(synchronize_session=False)
-                if _stale_chk_count:
-                    db.commit()
-                    print(
-                        f"[START AUDIT] Discarded {_stale_chk_count} stale checkpoint(s) "
-                        f"for session {req.session_id} before fresh start.",
-                        flush=True
-                    )
-            except Exception as _chk_err:
-                db.rollback()
-                print(f"[START AUDIT] Stale checkpoint cleanup failed (non-fatal): {_chk_err}", flush=True)
+            # ── FRESH SCAN VS RESUME CHECKPOINT CLEANUP ───────────────────────
+            # If starting a FRESH scan (is_resume=False):
+            # 1. Purge unverified draft findings from previous runs on this session
+            #    (Human-verified / saved-to-Shakthi ledger findings are ALWAYS preserved).
+            # 2. Discard stale checkpoints from previous runs.
+            # If is_resume=True: PRESERVE all findings and checkpoint state.
+            if not req.is_resume:
+                try:
+                    deleted_drafts = db.query(Finding).filter(
+                        Finding.report_id == report_id,
+                        (Finding.human_verified != True) | (Finding.human_verified.is_(None)),
+                        (Finding.is_saved_to_shakthi != True) | (Finding.is_saved_to_shakthi.is_(None))
+                    ).delete(synchronize_session=False)
+                    
+                    _stale_chk_count = db.query(AuditCheckpoint).filter(
+                        AuditCheckpoint.session_id == req.session_id
+                    ).delete(synchronize_session=False)
+                    
+                    if deleted_drafts or _stale_chk_count:
+                        db.commit()
+                        print(
+                            f"[START AUDIT] Fresh scan initialized for session {req.session_id}: "
+                            f"cleared {deleted_drafts} unverified draft finding(s) and {_stale_chk_count} stale checkpoint(s).",
+                            flush=True
+                        )
+                except Exception as _clean_err:
+                    db.rollback()
+                    print(f"[START AUDIT] Stale findings cleanup failed (non-fatal): {_clean_err}", flush=True)
+            else:
+                print(f"[START AUDIT] Resuming interrupted scan for session {req.session_id} — preserving existing findings.", flush=True)
             # ──────────────────────────────────────────────────────────────────
 
             # Load evidence files text & bytes from disk. Must exclude
@@ -2096,6 +2105,38 @@ def api_deliver_report(
         raise
     except Exception as e:
         print(f"[DELIVER ERROR] session={session_id} | {e}", flush=True)
+        raise HTTPException(status_code=500, detail="Operation failed. Please try again.")
+    finally:
+class ResetSessionFindingsRequest(BaseModel):
+    session_id: str
+
+@router.post("/reset-session-findings")
+def api_reset_session_findings(req: ResetSessionFindingsRequest, request: Request):
+    """Purges all unverified draft findings for the given session ID, preserving human-verified / saved findings."""
+    auth_user = _require_auth(request)
+    db = SessionLocal()
+    try:
+        with force_master():
+            report = db.query(AuditReport).filter(AuditReport.session_id == req.session_id).first()
+            if not report:
+                raise HTTPException(status_code=404, detail="Session not found.")
+            _assert_session_access(db, report, auth_user)
+
+            deleted_count = db.query(Finding).filter(
+                Finding.report_id == report.id,
+                (Finding.human_verified != True) | (Finding.human_verified.is_(None)),
+                (Finding.is_saved_to_shakthi != True) | (Finding.is_saved_to_shakthi.is_(None))
+            ).delete(synchronize_session=False)
+
+            db.query(AuditCheckpoint).filter(AuditCheckpoint.session_id == req.session_id).delete(synchronize_session=False)
+            db.commit()
+
+            log_system_event("SESSION_FINDINGS_RESET", "INFO", f"Purged {deleted_count} unverified draft finding(s) for session {req.session_id}", session_id=req.session_id)
+            return {"success": True, "message": f"Cleared {deleted_count} draft finding(s).", "deleted_count": deleted_count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail="Operation failed. Please try again.")
     finally:
         db.close()

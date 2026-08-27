@@ -2857,6 +2857,32 @@ async function loadFindings() {
     }
 }
 
+async function resetSessionFindings() {
+    if (!activeSessionId) {
+        alert("No active session selected.");
+        return;
+    }
+    if (!confirm("Are you sure you want to clear unverified draft findings for this session?\n\n(Verified ledger records will be preserved.)")) {
+        return;
+    }
+    try {
+        const response = await authFetch(`${API_BASE}/audit/reset-session-findings`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: activeSessionId })
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+            showToastBanner(`🧹 ${data.message || 'Draft findings cleared successfully.'}`);
+            loadFindings();
+        } else {
+            alert(`Error clearing findings: ${data.detail || data.message || 'Failed'}`);
+        }
+    } catch (err) {
+        alert(`Failed to reset findings: ${err.message}`);
+    }
+}
+
 async function commitSessionToShaktiDB(force = false) {
     console.log("💾 [commitSessionToShaktiDB] Invoked. activeSessionId:", activeSessionId, "force:", force);
     if (!activeSessionId) {

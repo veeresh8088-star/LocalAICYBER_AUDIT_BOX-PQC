@@ -754,9 +754,14 @@
                             <span id="shakti-banner-text">Notice: Review records below and click "Save to Shakthi DB" to
                                 commit session.</span>
                         </div>
-                        <button class="btn-primary" onclick="commitSessionToShaktiDB()"
-                            style="background: linear-gradient(135deg, #10b981, #059669); border: none; padding: 8px 16px; font-weight: 700; font-size: 0.8rem; cursor: pointer; white-space: nowrap;">
-                            Save to Shakthi DB</button>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn-secondary" onclick="resetSessionFindings()"
+                                style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171; padding: 8px 14px; font-weight: 700; font-size: 0.8rem; cursor: pointer; white-space: nowrap; border-radius: 6px;">
+                                🧹 Clear Draft Findings</button>
+                            <button class="btn-primary" onclick="commitSessionToShaktiDB()"
+                                style="background: linear-gradient(135deg, #10b981, #059669); border: none; padding: 8px 16px; font-weight: 700; font-size: 0.8rem; cursor: pointer; white-space: nowrap;">
+                                Save to Shakthi DB</button>
+                        </div>
                     </div>
 
                     <div class="audit-records-filters" style="margin-top: 12px; margin-bottom: 16px;">
