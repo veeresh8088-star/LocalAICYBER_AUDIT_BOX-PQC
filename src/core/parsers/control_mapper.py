@@ -451,7 +451,7 @@ def get_actionable_remediation(finding: Finding) -> str:
             "ELLIPTIC CURVE CRYPTOGRAPHY (ECC)", "ASYMMETRIC ENCRYPTION (RSA)"
         )
         or (finding.control_id or "").upper().startswith("PQC")
-        or getattr(finding, "quantum_status", None) is not None
+        or bool(getattr(finding, "quantum_status", ""))
     )
 
     # Check each template key against combined text. Word-boundary matched, not plain
