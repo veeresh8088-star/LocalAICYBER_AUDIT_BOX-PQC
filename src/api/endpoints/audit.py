@@ -2107,6 +2107,8 @@ def api_deliver_report(
         print(f"[DELIVER ERROR] session={session_id} | {e}", flush=True)
         raise HTTPException(status_code=500, detail="Operation failed. Please try again.")
     finally:
+        db.close()
+
 class ResetSessionFindingsRequest(BaseModel):
     session_id: str
 
