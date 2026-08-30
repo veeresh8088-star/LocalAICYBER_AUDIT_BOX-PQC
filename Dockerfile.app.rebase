@@ -1,0 +1,41 @@
+# App image rebuild that REUSES the customer's existing app image as its base,
+# instead of rebuilding from python:slim the way Dockerfile.app does.
+#
+# Why this exists
+# ---------------
+# Almost every release changes only Python and frontend code under src/ -- a few
+# hundred KB. Rebuilding through Dockerfile.app re-runs pip install and re-copies
+# ~1.6GB of OCR and reranker model caches, producing a 2.1GB image to ship for a
+# one-line fix. create_app_patch.py had the same problem from the other side: it
+# tarred src/ together with the caches, samples and tests, so its "patch" came to
+# ~2GB as well.
+#
+# Building on top of the image the customer already runs gives:
+#   * the same Python packages, at the same versions they have been running
+#   * the same baked-in doctr / huggingface caches, untouched -- so the image
+#     stays air-gapped with no re-download
+#   * ONE small layer, so the patch to ship is a few MB and the build is seconds
+#
+# Usage (on your machine, to produce the new image)
+#   docker build -f Dockerfile.app.rebase --build-arg APP_BASE_IMAGE=aicyberauditbox-app:3.22 -t aicyberauditbox-app:3.23 .
+#
+# Use Dockerfile.app instead when requirements.txt changes, when a system package
+# is added, or when the model caches change -- those alter layers below this one,
+# and a rebase would silently keep the old versions.
+
+ARG APP_BASE_IMAGE=aicyberauditbox-app:3.22
+FROM ${APP_BASE_IMAGE}
+
+# The base image ends on USER appuser, which cannot write into /app.
+USER root
+
+# The only change. Everything else -- installed packages, model caches, the
+# entrypoint, the exposed port -- is inherited from the base image.
+COPY --chown=appuser:appuser src/ /app/src/
+COPY --chown=appuser:appuser config/ /app/config/
+
+USER appuser
+
+# ENTRYPOINT, EXPOSE, WORKDIR and HEALTHCHECK are inherited and deliberately not
+# redeclared: restating them here would let them drift out of step with
+# Dockerfile.app, which stays the source of truth for image structure.

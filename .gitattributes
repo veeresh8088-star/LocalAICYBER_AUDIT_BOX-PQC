@@ -1,0 +1,20 @@
+# Shell scripts must keep LF even when checked out on Windows. install.sh and
+# apply_patch.sh are shipped to customers and run on their Linux servers; with
+# CRLF endings the kernel reads the shebang as "/bin/sh\r" and the install dies
+# with "bad interpreter". Git's autocrlf would otherwise convert them on a
+# Windows clone, so the break would only appear on the customer's machine.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+docker-compose*.yml text eol=lf
+
+# Batch files are the mirror image: they need CRLF to be parsed reliably by cmd.
+*.bat text eol=crlf
+
+# Binary assets git must not try to normalise.
+*.woff2 binary
+*.gguf binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary
+*.xlsx binary

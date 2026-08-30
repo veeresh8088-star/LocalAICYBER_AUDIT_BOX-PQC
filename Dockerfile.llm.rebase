@@ -1,0 +1,39 @@
+# LLM image rebuild that REUSES an already-built LLM image as its base,
+# instead of pulling ghcr.io/ggml-org/llama.cpp:server the way Dockerfile.llm
+# does.
+#
+# Why this exists
+# ---------------
+# Dockerfile.llm's base is a floating tag. Rebuilding through it pulls whatever
+# llama.cpp is current on the day of the build, which for a customer delivery
+# means shipping an engine version nobody has tested this app against.
+#
+# When the only thing changing is docker/llm-entrypoint.sh -- a few KB of shell
+# -- there is no reason to re-pull the base or re-COPY ~5.7GB of model weights.
+# Building on top of the known-good image instead gives:
+#   * the exact same llama.cpp engine the customer already runs
+#     (verified b10666 / commit 4e97ac86e, which advertises both --kv-unified
+#     and -ctk in its own --help)
+#   * the same baked-in model weights, untouched
+#   * a single small layer, so the build is seconds rather than a large pull
+#
+# Usage
+#   docker build -f Dockerfile.llm.rebase \
+#       --build-arg LLM_BASE_IMAGE=aicyberauditbox-llm:3.10 \
+#       -t aicyberauditbox-llm:3.18 .
+#
+# Use Dockerfile.llm instead when the engine or the models genuinely need to
+# change -- and pin its base to a digest at that point, so the next rebuild is
+# reproducible rather than dated.
+
+ARG LLM_BASE_IMAGE=aicyberauditbox-llm:3.10
+FROM ${LLM_BASE_IMAGE}
+
+# The only change. Everything else -- llama-server, both .gguf models, the
+# healthcheck, the exposed ports -- is inherited from the base image.
+COPY docker/llm-entrypoint.sh /llm-entrypoint.sh
+RUN chmod +x /llm-entrypoint.sh
+
+# ENTRYPOINT, EXPOSE and HEALTHCHECK are inherited and deliberately not
+# redeclared: restating them here would let them drift out of step with
+# Dockerfile.llm, which stays the source of truth for image structure.

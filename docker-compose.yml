@@ -45,7 +45,7 @@
     build:
       context: .
       dockerfile: Dockerfile.llm
-    image: aicyberauditbox-llm:3.21
+    image: aicyberauditbox-llm:3.22
     container_name: aicyberauditbox_llm
     environment:
       - LLM_MODE=completion
@@ -86,7 +86,7 @@
     build:
       context: .
       dockerfile: Dockerfile.llm
-    image: aicyberauditbox-llm-embed:3.21
+    image: aicyberauditbox-llm-embed:3.22
     container_name: aicyberauditbox_llm_embed
     environment:
       - LLM_MODE=embedding
@@ -99,7 +99,7 @@
     build:
       context: .
       dockerfile: Dockerfile.app
-    image: aicyberauditbox-app:3.21
+    image: aicyberauditbox-app:3.22
     container_name: aicyberauditbox_app
     # Shares shakthidb's network namespace so "localhost:15234" inside this
     # container genuinely reaches Postgres, matching database.py's hardcoded

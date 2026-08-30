@@ -43,7 +43,7 @@ services:
     restart: always
 
   llm:
-    image: aicyberauditbox-llm:3.21
+    image: aicyberauditbox-llm:3.22
     container_name: aicyberauditbox_llm
     environment:
       - LLM_MODE=completion
@@ -73,7 +73,7 @@ services:
     restart: always
 
   llm-embed:
-    image: aicyberauditbox-llm-embed:3.21
+    image: aicyberauditbox-llm-embed:3.22
     container_name: aicyberauditbox_llm_embed
     environment:
       - LLM_MODE=embedding
@@ -83,7 +83,7 @@ services:
     restart: always
 
   app:
-    image: aicyberauditbox-app:3.21
+    image: aicyberauditbox-app:3.22
     container_name: aicyberauditbox_app
 
     network_mode: "service:shakthidb"
