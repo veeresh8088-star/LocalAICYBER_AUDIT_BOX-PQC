@@ -974,6 +974,125 @@ _REMEDIATION_SAFE = (
 )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  STANDARDS REFERENCES -- impacted FIPS, NIST SP 800-53 controls, and CVEs
+# ══════════════════════════════════════════════════════════════════════════════
+# Auditor feedback: a finding that says "NIST Reference: FIPS 203, FIPS 204,
+# FIPS 205" tells the reader nothing -- it lists every PQC standard regardless
+# of what was actually found. The description has to name the ONE standard that
+# replaces the primitive in this finding.
+#
+# The mapping is by primitive, and the distinction that matters is:
+#
+#   FIPS 203  ML-KEM    replaces KEY ESTABLISHMENT  (RSA key transport, DH, ECDH)
+#   FIPS 204  ML-DSA    replaces SIGNATURES         (RSA sig, DSA, ECDSA, EdDSA)
+#   FIPS 205  SLH-DSA   alternative signature scheme, hash-based
+#   FIPS 206  FN-DSA    still DRAFT -- never cited as a remediation target
+#
+# Symmetric ciphers and hash functions are deliberately absent. Grover's
+# algorithm only halves their effective strength, so they are addressed by
+# larger parameters (AES-256, SHA-384+) under CNSA 2.0 -- NOT by any of the
+# FIPS 203-206 standards. Naming a PQC standard on an RC4 or MD5 finding would
+# be precisely the imprecision this table exists to remove.
+_FIPS_BY_CATEGORY = {
+    "Asymmetric Encryption (RSA)":
+        "FIPS 203 (ML-KEM) where RSA performs key establishment, and FIPS 204 "
+        "(ML-DSA) where it performs digital signatures",
+    "Asymmetric Digital Signature (DSA)":
+        "FIPS 204 (ML-DSA), with FIPS 205 (SLH-DSA) as the hash-based alternative",
+    "Key Exchange (Diffie-Hellman)":            "FIPS 203 (ML-KEM)",
+    "Key Exchange (Elliptic Curve)":            "FIPS 203 (ML-KEM)",
+    "Elliptic Curve Cryptography (ECC)":
+        "FIPS 203 (ML-KEM) where the curve performs key agreement, and FIPS 204 "
+        "(ML-DSA) where it performs signatures",
+    "Database TLS Configuration":               "FIPS 203 (ML-KEM) for the TLS handshake",
+    "Application TLS Configuration":            "FIPS 203 (ML-KEM) for the TLS handshake",
+    "Container / Cloud TLS Configuration":      "FIPS 203 (ML-KEM) for the TLS handshake",
+    "Protocol Version":                         "FIPS 203 (ML-KEM) for the TLS handshake",
+}
+
+# Rule-level overrides, where the curve's ROLE is unambiguous and the broader
+# "Elliptic Curve Cryptography (ECC)" category answer would be vaguer than it
+# needs to be. X25519 only ever does key agreement; Ed25519 only ever signs.
+_FIPS_BY_RULE = {
+    "ecc-x25519": "FIPS 203 (ML-KEM)",
+    "ecc-ed25519": "FIPS 204 (ML-DSA)",
+    "ecdh":        "FIPS 203 (ML-KEM)",
+    "ecdhe":       "FIPS 203 (ML-KEM)",
+    "ecdsa":       "FIPS 204 (ML-DSA)",
+}
+
+# NIST SP 800-53 Rev 5 controls each finding bears on. SC-13 (Cryptographic
+# Protection) applies to every cryptographic finding; the rest are what make
+# the reference useful to an assessor rather than boilerplate.
+_NIST_80053_BY_CATEGORY = {
+    "Asymmetric Encryption (RSA)":          "SC-12, SC-13",
+    "Asymmetric Digital Signature (DSA)":   "SC-13, SC-17, IA-7",
+    "Key Exchange (Diffie-Hellman)":        "SC-12, SC-13",
+    "Key Exchange (Elliptic Curve)":        "SC-12, SC-13",
+    "Elliptic Curve Cryptography (ECC)":    "SC-12, SC-13, SC-17",
+    "Hash Function":                        "SC-13",
+    "Symmetric Cipher":                     "SC-13, SC-28",
+    "Symmetric Cipher (AEAD)":              "SC-13, SC-28",
+    "Cipher Mode":                          "SC-8(1), SC-13",
+    "Protocol Version":                     "SC-8, SC-8(1), SC-13",
+    "Database TLS Configuration":           "SC-8, SC-8(1), SC-12, SC-13",
+    "Application TLS Configuration":        "SC-8, SC-8(1), SC-12, SC-13",
+    "Container / Cloud TLS Configuration":  "SC-8, SC-8(1), SC-12, SC-13",
+}
+_NIST_80053_DEFAULT = "SC-13"
+
+# Real, published CVEs only.
+#
+# Being quantum-vulnerable is NOT a CVE: there is no CVE for "RSA-2048 will be
+# broken by Shor's algorithm", and inventing one would put a fabricated
+# identifier into an audit report. So this table covers only the CLASSICAL
+# breaks that carry a genuine CVE, and every quantum-only finding leaves
+# cve_list empty -- which bg_worker already renders as "No CVE assigned".
+_CVE_BY_RULE = {
+    "md5":     ["CVE-2004-2761"],                    # MD5 collision -> cert forgery
+    "sha1":    ["CVE-2005-4900"],                    # SHA-1 collision
+    "3des":    ["CVE-2016-2183"],                    # SWEET32, 64-bit block birthday
+    "des":     ["CVE-2016-2183"],                    # SWEET32
+    "rc4":     ["CVE-2013-2566", "CVE-2015-2808"],   # RC4 biases; Bar Mitzvah
+    "sslv2":   ["CVE-2016-0800"],                    # DROWN
+    "sslv3":   ["CVE-2014-3566"],                    # POODLE
+    "tls10":   ["CVE-2011-3389"],                    # BEAST
+    "gnutls-tls10":       ["CVE-2011-3389"],
+    "winreg-schannel-tls10": ["CVE-2011-3389"],
+    "cbc-mode": ["CVE-2013-0169"],                   # Lucky Thirteen
+}
+
+# Logjam applies to 512/768/1024-bit groups, not to every Diffie-Hellman group.
+# Attaching it to DH Group 14 (2048-bit) would be a false citation, so the
+# group number decides -- the same callable idiom ALGORITHM_RULES already uses
+# for its namers and severities.
+_LOGJAM_GROUPS = {"1", "2"}          # Group 1 = 768-bit, Group 2 = 1024-bit
+
+
+def _dh_group_cves(matched_text: str):
+    m = re.search(r'(\d{1,2})', matched_text or "")
+    if m and m.group(1) in _LOGJAM_GROUPS:
+        return ["CVE-2015-4000"]     # Logjam
+    return []
+
+
+def _cves_for(rule_id: str, matched_text: str):
+    """Published CVEs for this rule, or [] when the weakness is quantum-only."""
+    if rule_id == "dh-group":
+        return _dh_group_cves(matched_text)
+    return list(_CVE_BY_RULE.get(rule_id, ()))
+
+
+def _fips_impacted(rule_id: str, crypto_category: str) -> str:
+    """The PQC standard that replaces THIS primitive, or '' when none does."""
+    return _FIPS_BY_RULE.get(rule_id) or _FIPS_BY_CATEGORY.get(crypto_category, "")
+
+
+def _nist_80053_for(crypto_category: str) -> str:
+    return _NIST_80053_BY_CATEGORY.get(crypto_category, _NIST_80053_DEFAULT)
+
+
 def _resolve(value, m):
     if value is None:
         return m.group(0)
@@ -1774,6 +1893,25 @@ class PQCParser(BaseParser):
                     )
                     remediation = _REMEDIATION_SAFE
 
+                # ── Name the ONE standard this finding bears on ──────────────
+                # Only for findings that call for migration. A SAFE finding has
+                # nothing to migrate to, and a classically-WEAK symmetric cipher
+                # or hash is not replaced by FIPS 203-206 at all -- so neither
+                # gets a PQC standard appended, which is the whole point of
+                # being specific rather than listing all four.
+                _cves = _cves_for(rule_id, m.group(0))
+                if quantum_status == "VULNERABLE":
+                    _fips = _fips_impacted(rule_id, crypto_category)
+                    if _fips:
+                        description += (
+                            f" The applicable post-quantum replacement standard is {_fips}."
+                        )
+                if _cves:
+                    description += (
+                        f" This algorithm additionally carries a published classical weakness: "
+                        f"{', '.join(_cves)}."
+                    )
+
                 finding = Finding(
                     title=title,
                     severity=severity,
@@ -1783,7 +1921,9 @@ class PQCParser(BaseParser):
                     evidence=evidence_line,
                     plugin_id=f"PQC-{rule_id}",
                     source_tool="PQC-Scan",
+                    cve_list=_cves,
                 )
+                finding.nist_80053_controls = _nist_80053_for(crypto_category)
                 finding.asset_name = asset_ctx
                 # Auto-classify the asset category from filename + context window.
                 _cat_window = content[max(0, start - 400): min(len(content), end + 400)]

@@ -1691,6 +1691,7 @@ def api_get_findings(request: Request, session_id: str, saved_only: bool = False
                 # same pattern as the PQC context fields above.
                 "risk_score": f.risk_score,
                 "risk_band": f.risk_band or "",
+                "nist_80053_controls": f.nist_80053_controls or "",
                 "business_priority": f.business_priority or "",
                 "oem_product": f.oem_product or "",
                 "oem_readiness_status": f.oem_readiness_status or "",
@@ -2782,6 +2783,7 @@ def api_export_docx(
                     # same pattern as the PQC context fields above.
                     "risk_score": f.risk_score,
                     "risk_band": f.risk_band or "",
+                    "nist_80053_controls": f.nist_80053_controls or "",
                     "business_priority": f.business_priority or "",
                     "oem_product": f.oem_product or "",
                     "oem_readiness_status": f.oem_readiness_status or "",
@@ -3176,6 +3178,7 @@ def api_export_pdf(
                     # same pattern as the PQC context fields above.
                     "risk_score": f.risk_score,
                     "risk_band": f.risk_band or "",
+                    "nist_80053_controls": f.nist_80053_controls or "",
                     "business_priority": f.business_priority or "",
                     "oem_product": f.oem_product or "",
                     "oem_readiness_status": f.oem_readiness_status or "",

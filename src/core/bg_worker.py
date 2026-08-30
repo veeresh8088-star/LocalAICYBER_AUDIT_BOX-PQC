@@ -2507,6 +2507,7 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                             oem_readiness_status=f.get("oem_readiness_status") or "",
                             dependency_chain=f.get("dependency_chain") or "",
                             migration_dependency_flag=bool(f.get("migration_dependency_flag") or False),
+                            nist_80053_controls=f.get("nist_80053_controls") or "",
                         )
                         # Strip NUL bytes (0x00) from every text field -- PDFs, HTML, and OCR
                         # text occasionally extract with embedded NUL bytes, which SQLite/

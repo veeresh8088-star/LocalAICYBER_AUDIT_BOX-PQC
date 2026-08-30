@@ -1136,9 +1136,11 @@ def _export_vapt_pdf(session_title, findings, resolved_list, status, comments=""
         rb_medium   = FontFace(emphasis="B", color=(255, 255, 255), fill_color=(255, 192, 0))
         rb_low      = FontFace(emphasis="B", color=(255, 255, 255), fill_color=(0, 176, 80))
 
-        with pdf.table(col_widths=(20, 17, 17, 17, 18, 13, 8, 13, 14, 16, 16, 18), text_align="L") as table:
+        # NIST 800-53 is the last column: an assessor reads the inventory left to
+        # right as asset -> what it uses -> how bad -> which control it lands on.
+        with pdf.table(col_widths=(19, 15, 15, 15, 16, 11, 7, 12, 13, 15, 15, 16, 15), text_align="L") as table:
             h = table.row()
-            for hdr_txt in ["Asset", "CA Algorithm", "Key Algorithm", "Protocol", "Quantum Status", "Exposure", "Port", "Environment", "Severity", "Risk Score", "Business Priority", "OEM Readiness"]:
+            for hdr_txt in ["Asset", "CA Algorithm", "Key Algorithm", "Protocol", "Quantum Status", "Exposure", "Port", "Environment", "Severity", "Risk Score", "Business Priority", "OEM Readiness", "NIST 800-53"]:
                 h.cell(hdr_txt, style=hdr_blue)
             for pf in pqc_findings:
                 qs = str(pf.get("quantum_status") or "").strip().upper()
@@ -1163,6 +1165,7 @@ def _export_vapt_pdf(session_title, findings, resolved_list, status, comments=""
                 r.cell(clean_text(_rscore_text), style=rb_style if _rscore_text else body_style)
                 r.cell(clean_text(pf.get("business_priority") or ""), style=body_style)
                 r.cell(clean_text(_oem_text), style=body_style)
+                r.cell(clean_text(pf.get("nist_80053_controls") or ""), style=body_style)
 
         # Migration Dependencies -- only rendered when at least one PQC finding
         # flags a downstream dependency also being quantum-vulnerable.

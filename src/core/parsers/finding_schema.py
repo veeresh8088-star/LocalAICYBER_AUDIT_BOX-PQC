@@ -103,6 +103,10 @@ class Finding:
     oem_readiness_status: str = ""        # Matched vendor's PQC readiness status, e.g. "PQC Roadmap Available"
     dependency_chain: str = ""            # Full explicit dependency chain string this asset appears in, e.g. "A -> B -> C"
     migration_dependency_flag: bool = False  # True if a downstream/chain-linked asset also has a VULNERABLE finding
+    # NIST SP 800-53 Rev 5 control references this finding bears on, e.g.
+    # "SC-12, SC-13". Populated by pqc_parser from the crypto category; blank
+    # for every other parser, so nothing else changes shape.
+    nist_80053_controls: str = ""
 
     def __post_init__(self):
         # Normalize severity to uppercase standard string

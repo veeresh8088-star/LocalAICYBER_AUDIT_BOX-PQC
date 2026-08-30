@@ -189,6 +189,7 @@ class Finding(Base):
     oem_readiness_status       = Column(String(100), nullable=True) # e.g. "PQC Roadmap Available"
     dependency_chain           = Column(Text, nullable=True)        # Rendered dependency chain string
     migration_dependency_flag  = Column(Boolean, nullable=True)     # True if a downstream dependency is also vulnerable
+    nist_80053_controls        = Column(String(200), nullable=True) # NIST SP 800-53 Rev 5 refs, e.g. "SC-12, SC-13"
 
     # Auditor-editable custom heading (overrides control_name display in UI and reports)
     # Nullable so existing rows are unaffected. Applied to both VAPT and ISO findings.
