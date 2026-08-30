@@ -1874,6 +1874,79 @@ def derive_policy_required(req_text: str, control_id: str = "", control_name: st
     return False
 
 
+# Phrases that describe a MISSING DOCUMENT rather than a missing operational
+# control. When policy_status resolves to NOT_REQUIRED, a gap phrased this way
+# is asking for something the control was already judged not to need.
+_POLICY_DEMAND_MARKERS = (
+    "documented policy", "document a policy", "written policy", "formal policy",
+    "policy defining", "policy document", "formal documentation",
+    "documented procedure", "policy statement", "documented standard",
+    "formal documented", "policy or procedure",
+)
+
+
+def _split_requirements(text: str):
+    """Split a joined 'Missing Requirements' string back into its items.
+
+    post_process joins them with ', ' before this point, and individual
+    requirements routinely contain commas of their own -- so split on the
+    sentence boundary the generator actually produces ('., ') first, and fall
+    back to a plain comma split only when that finds nothing.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    if "., " in raw:
+        parts = [p.strip() for p in raw.split("., ")]
+        return [p if p.endswith(".") else p + "." for p in parts if p]
+    return [p.strip() for p in raw.split(", ") if p.strip()]
+
+
+def _drop_policy_demands(gap_description: str, control_id: str = "") -> str:
+    """Remove policy-document demands from a gap when no policy is required.
+
+    Only the 'Missing Requirements:' segment is touched; 'Business Impact:' is
+    a statement about consequence and stays exactly as written. If every listed
+    requirement turns out to be a policy demand, the segment is dropped rather
+    than left empty -- an empty 'Missing Requirements:' label reads as a bug.
+    """
+    text = str(gap_description or "").strip()
+    if not text or "Missing Requirements:" not in text:
+        return text
+
+    head, _, tail = text.partition("Missing Requirements:")
+    kept = [r for r in _split_requirements(tail)
+            if not any(m in r.lower() for m in _POLICY_DEMAND_MARKERS)]
+
+    head = head.rstrip().rstrip("|").rstrip()
+    if kept:
+        return (head + " | " if head else "") + "Missing Requirements: " + " ".join(kept)
+    if head:
+        return head
+    # Nothing survived and there was no business-impact half either: say what is
+    # actually wrong on the evidence side instead of returning an empty string.
+    return (f"The evidence provided does not demonstrate that this requirement is met"
+            + (f" for {control_id}" if control_id else "") + ".")
+
+
+def _rewrite_policy_recommendation(recommendation: str, control_id: str = "") -> str:
+    """Replace a 'write a policy' recommendation when none is required.
+
+    The recommendation is chosen from the LLM's policy_status long before the
+    deterministic layer settles on NOT_REQUIRED, so it can survive as advice to
+    document a policy the control never asked for.
+    """
+    text = str(recommendation or "").strip()
+    if not text:
+        return text
+    if not any(m in text.lower() for m in _POLICY_DEMAND_MARKERS):
+        return text
+    return (f"Provide operational evidence that demonstrates this requirement is met"
+            + (f" for {control_id}" if control_id else "")
+            + ". A written policy is not required for this control; the gap is in the "
+              "records, logs or configuration showing it is actually done.")
+
+
 def policy_required_reason(req_text: str, control_id: str = "", control_name: str = "") -> str:
     """Why derive_policy_required() answered as it did: 'keyword', 'clause_fallback', or 'none'.
 
@@ -2486,6 +2559,26 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
         # which of the two a reader trusts.
         if policy_status == "NOT_REQUIRED":
             finding["policy_gap"] = "Not applicable — policy is not required for this requirement."
+            # ...and reconcile the text that was already written on the assumption
+            # a policy WAS required.
+            #
+            # gap_description and recommendation are both built far earlier in
+            # post_process, from the LLM's own policy_status. This block is where
+            # the deterministic layer overrules that to NOT_REQUIRED -- so without
+            # this, a finding ships reading:
+            #
+            #     Policy: Not Required
+            #     Missing Requirements: A documented policy defining the retention
+            #                           period and archival procedure for logs.
+            #
+            # Both halves of one finding, flatly contradicting each other. Observed
+            # on real output for 5.33 Protection of Records and 8.6 Capacity
+            # Management. The verdict may still be correct; the stated REASON is
+            # not, and an auditee reading the exported report spots it immediately.
+            finding["gap_description"] = _drop_policy_demands(
+                finding.get("gap_description"), control_id)
+            finding["recommendation"] = _rewrite_policy_recommendation(
+                finding.get("recommendation"), control_id)
 
         if not evidence_items:
             evidence_status = "NOT_FOUND"
