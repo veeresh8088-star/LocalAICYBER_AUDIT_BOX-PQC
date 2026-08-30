@@ -35,3 +35,17 @@ samples/AICyberAuditOPS Sample Data/
 docker/cache/
 testsprite_tests/tmp/
 testsprite_tests/tmp/config.json
+
+# Leftovers from an interrupted `docker save` that unpacked into the repo root.
+/oci-layout
+/index.json
+/manifest.json
+/blobs/
+
+# Console output caught by a stray redirect in run_all.bat.
+/4
+
+# Capacity-run artifacts -- regenerated per run, not source.
+real_user_simulation_cpu_*.csv
+real_user_simulation_cpu_*_report.md
+sys_report_*users*.md

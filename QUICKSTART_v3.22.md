@@ -53,9 +53,9 @@ docker compose logs llm | grep "LLM ENTRYPOINT"
 You should see the context line, which is new in this release:
 
 ```
-[LLM ENTRYPOINT] Detected 16.00GB and 8 core(s), ~1.92GB per 32768-token slot
+[LLM ENTRYPOINT] Detected 16.00GB and 8 core(s), ~1.92GB per 32768-token slot -> 4 slot(s), bounded by RAM (16.00GB; 8 core(s) available).
                  -> 4 slot(s), bounded by RAM (16.00GB; 8 core(s) available).
-[LLM ENTRYPOINT] Context: -c 131072 across 4 slot(s) = 32768 tokens per request
+[LLM ENTRYPOINT] Context: -c 131072 across 4 slot(s) = 32768 tokens per request (kv_unified=yes, kv_8bit=yes).
                  (kv_unified=yes, kv_8bit=yes).
 ```
 
