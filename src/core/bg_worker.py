@@ -1,4 +1,5 @@
 import os
+import math
 import io
 import sys
 import time
@@ -19,6 +20,44 @@ from src.db.database import (
     force_master,
     get_all_custom_controls
 )
+
+def _safe_float(value, default=0.0):
+    """Best-effort float. Parser scores arrive as float, str or None."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _detect_physical_cores():
+    """Physical core count, or None when it can't be determined.
+
+    Physical rather than logical on purpose: llama.cpp gains nothing from SMT on
+    this workload, so a logical count would overstate the machine's real capacity
+    in the capacity message and recommend too few cores.
+    """
+    try:
+        import psutil
+        return psutil.cpu_count(logical=False) or psutil.cpu_count()
+    except Exception:
+        try:
+            return os.cpu_count()
+        except Exception:
+            return None
+
+
+def _count_active_sessions():
+    """Concurrent audits at this moment, from Redis with an in-memory fallback."""
+    try:
+        from src.core.redis_metrics import get_running_session_count
+        return get_running_session_count()
+    except Exception:
+        try:
+            from src.core.bg_state import _bg_running
+            return len(_bg_running)
+        except Exception:
+            return 1
+
 
 def log_system_event(event_type, severity, details, session_id=None, actor="System"):
     """Logs an audit error/warning/event into SystemEvent for the Privacy-Safe System Log Trail.
@@ -488,16 +527,26 @@ def _build_controls_for_audit(selected_sls=None, custom_evidence=None):
 
 
 def get_num_ctx(model_name: str) -> int:
-    name = model_name.lower()
-    if "12b" in name:
-        return 8192
-    if any(x in name for x in ["7b", "8b", "9b", "27b"]):
-        return 8192
-    if "3b" in name:
+    """Per-request context, read from the running server rather than guessed.
+
+    This used to be a hardcoded table whose e4b branch returned 32768, with the
+    comment "server runs -c 32768 -> full 32k context available per request".
+    That comment was wrong: llama.cpp divides -c evenly across -np slots, so the
+    real per-request figure is -c/-np. On a customer box running 8 slots it was
+    4096, not 32768 -- and because retrieval.py already sized prompts against
+    the true value via get_real_num_ctx(), the two halves of the same pipeline
+    disagreed by 8x. Ask the server; it knows, and it is the same source
+    audit_chains.py::get_num_ctx already uses.
+    """
+    try:
+        from src.core.llm_client import get_real_num_ctx
+        return get_real_num_ctx()
+    except Exception as e:
+        # This used to be a pure lookup table that could not fail. It now asks
+        # the server, so keep a floor: a context-summary call is not worth
+        # aborting an audit over.
+        print(f"[LLM CTX] get_num_ctx fell back to 4096 for {model_name!r}: {e}", flush=True)
         return 4096
-    if "e4b" in name:
-        return 32768  # server runs -c 32768 → full 32k context available per request
-    return 4096
 
 def _generate_context_summary(context, llm_model):
     """Generates a brief document scope summary using the configured LLM backend.
@@ -1042,6 +1091,10 @@ Return format: ["topic1", "topic2", ...]"""
         matched_policy_files = []    # Locked files that came from a Policy-named column
         matched_evidence_only_files = []  # Locked files that came from an Evidence-only column
         excel_no_evidence_mapped = False
+        # Why the scope was blocked, when it was. Defaults to the plain
+        # "nothing mapped" case; ambiguity sets its own so the auditor is told the
+        # checklist is the problem rather than the evidence.
+        excel_scope_block_reason = None
 
         def _extract_canonical_id(s):
             if not s: return ""
@@ -1245,7 +1298,38 @@ Return format: ["topic1", "topic2", ...]"""
 
         has_tier1_explicit_assignment = bool(raw_tier1_policy_refs or raw_tier1_evidence_refs or raw_tier1_generic_refs)
 
-        if has_tier1_explicit_assignment:
+        # Ambiguity must STOP the cascade, not fall through it.
+        #
+        # _match_excel_row() already detects the case where several checklist rows
+        # share a control ID and none can be tied to this control -- it returns
+        # (None, True) and logs [SCOPING AMBIGUITY]. But `is_ambiguous` was then
+        # never read. With no row matched, no Tier 1 refs were collected, so the
+        # condition below was False and Tier 2/3 ran, ending at the "no
+        # filename/keyword match" fallback that hands the control EVERY uploaded
+        # file. The control was audited against evidence belonging to other rows'
+        # questions -- precisely the cross-row bleed Excel scoping exists to stop,
+        # and the loudest possible failure turned into the widest possible scope.
+        #
+        # An unmapped control reported as such is honest; one silently audited
+        # against everything is not.
+        if is_excel_mode and is_ambiguous and not has_tier1_explicit_assignment:
+            control_file_names = []
+            target_evidence_files = []
+            excel_no_evidence_mapped = True
+            excel_scope_block_reason = (
+                f"Ambiguous checklist scope: multiple rows share control ID "
+                f"'{cid_canon}' and none could be matched to this question. No files were "
+                f"assigned, to avoid auditing this control against another row's evidence. "
+                f"Give each row a distinct question or control ID and re-run."
+            )
+            control_context = ""
+            print(
+                f"[CONTROL FILE SCOPE] {c['control']}: scope left EMPTY -- multiple checklist "
+                f"rows share this control ID and none matched uniquely. Refusing to borrow "
+                f"another row's files.",
+                flush=True
+            )
+        elif has_tier1_explicit_assignment:
             # ── Tier 1: Explicit File Assignment (AUTHORITATIVE) ──────────────
             matched_policy_files = _match_refs(raw_tier1_policy_refs)
             matched_evidence_only_files = _match_refs(raw_tier1_evidence_refs)
@@ -1431,7 +1515,7 @@ Return format: ["topic1", "topic2", ...]"""
             # without the risk of the LLM being handed unrelated session files)
             # to arrive at the same place.
             ctrl_duration = time.time() - control_start_time
-            _no_evidence_msg = "No evidence file was mapped to this control in the uploaded Excel checklist."
+            _no_evidence_msg = excel_scope_block_reason or "No evidence file was mapped to this control in the uploaded Excel checklist."
             result = {
                 "control_id": c["control"],
                 "control_label": c["label"],
@@ -1518,7 +1602,7 @@ Return format: ["topic1", "topic2", ...]"""
                 # ── Redis: push per-control metrics live ─────────────────────────
                 try:
                     _rm.push_control_metrics(
-                        session_id=checkpoint_session_id or bg_key or _sid,
+                        session_id=checkpoint_session_id or bg_key,
                         prompt_tokens=ctrl_p_toks,
                         comp_tokens=ctrl_c_toks,
                         latency_sec=ctrl_duration
@@ -1530,7 +1614,7 @@ Return format: ["topic1", "topic2", ...]"""
                 log_dev_latency(f"ERROR: Control {c['control']} failed: {e}")
                 # ── Redis: push error signal ─────────────────────────────────────
                 try:
-                    _rm.push_error(session_id=checkpoint_session_id or bg_key or _sid)
+                    _rm.push_error(session_id=checkpoint_session_id or bg_key)
                 except Exception:
                     pass
 
@@ -1570,6 +1654,49 @@ Return format: ["topic1", "topic2", ...]"""
     end_msg = f"[AUDIT COMPLETE] Evaluated {total} controls in {tot_lat_str} ({total_audit_time:.1f}s). Compliant: {len(resolved_list)}, Gaps: {len(findings_list)}"
     print(f"[{time.strftime('%H:%M:%S')}] {end_msg}\n", flush=True)
     log_dev_latency(end_msg)
+
+    # ── Capacity report: name the hardware when controls could not be evaluated ──
+    # A timeout used to leave the auditor with a finding that read like any other.
+    # Counting them at the end turns an invisible degradation into a specific,
+    # actionable statement about the machine -- every figure below is already known
+    # at this point, so the recommendation costs nothing to produce.
+    try:
+        _not_evaluated = [
+            r for r in (all_results or [])
+            if str((r or {}).get("status") or (r or {}).get("final_result") or "").upper() == "NOT_EVALUATED"
+        ]
+        if _not_evaluated:
+            _cores = _detect_physical_cores()
+            _active = max(1, _count_active_sessions())
+            # Cores needed to bring the average control inside the 10-minute target
+            # at the concurrency actually observed, from the measured per-control
+            # wall time. Halved-utilisation assumption is deliberate: it reports the
+            # figure that also leaves the headroom the deployment was sized for.
+            _avg_ctrl_sec = (total_audit_time / max(1, total)) or 0
+            _needed = None
+            if _cores and _avg_ctrl_sec > 0:
+                _needed = int(math.ceil((_cores * _avg_ctrl_sec) / 600.0 / 2.0) * 2)
+            _cap_msg = (
+                f"{len(_not_evaluated)} of {total} controls could not be evaluated "
+                f"(analysis engine timeout) with {_active} audit(s) running."
+            )
+            if _cores and _needed and _needed > _cores:
+                _cap_msg += (
+                    f" This server has {_cores} CPU core(s); approximately {_needed} "
+                    f"are needed to evaluate every control at this concurrency."
+                )
+            elif _cores:
+                _cap_msg += f" This server has {_cores} CPU core(s)."
+            _cap_msg += " Re-run the affected controls."
+            print(f"[CAPACITY] {_cap_msg}", flush=True)
+            log_system_event("CAPACITY_SHORTFALL", "WARNING", _cap_msg,
+                             session_id=checkpoint_session_id or bg_key or "System")
+            if bg_key:
+                with _bg_lock:
+                    _prev = _bg_store["progress"].get(bg_key) or {}
+                    _bg_store["progress"][bg_key] = {**_prev, "warning": f"⚠️ {_cap_msg}"}
+    except Exception as _cap_err:
+        print(f"[CAPACITY] Summary skipped (non-fatal): {_cap_err}", flush=True)
 
     # Record benchmark metrics for Excel tracker & Terminal Summary Box
     try:
@@ -1695,7 +1822,7 @@ Return format: ["topic1", "topic2", ...]"""
             f"Tokens: {tot_tokens_all:,} (prompt: {prompt_toks:,}, completion: {comp_toks:,}) | "
             f"Latency: {tot_lat_str} | Files: {total_files_cnt} ({file_size_mb} MB) | "
             f"Scoping: {scoping_label}",
-            session_id=checkpoint_session_id or bg_key or _sid,
+            session_id=checkpoint_session_id or bg_key,
             actor=auditor_user
         )
 
@@ -1704,7 +1831,7 @@ Return format: ["topic1", "topic2", ...]"""
 
     # ── Redis: mark session as done / paused ─────────────────────────────────
     try:
-        _rm.session_done(session_id=checkpoint_session_id or bg_key or _sid, status="paused" if was_resource_paused else "done")
+        _rm.session_done(session_id=checkpoint_session_id or bg_key, status="paused" if was_resource_paused else "done")
     except Exception:
         pass
 
@@ -2055,7 +2182,16 @@ def _run_ollama_bg(bg_key, files_data, selected_sls_copy, ai_model, session_id=N
             _bg_store["progress"].pop(bg_key, None)
             _bg_stop_flags.pop(bg_key, None)  # Clear stop flag on thread exit
 
-def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=None):
+def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=None, framework=""):
+    # `framework` decides which parser family parse_tool_file() is allowed to use.
+    # It used to be absent entirely, so every call below passed the literal "vapt"
+    # -- including calls made for a PQC session, since PQC is a technical-mode scan
+    # and routes through this same function. parse_tool_file() removes PQCParser
+    # from its candidate list and skips the PQC binary fast-path whenever the
+    # framework is "vapt", so a PQC scan could not produce a single PQC finding:
+    # the parser was unreachable from the only code path that reaches it.
+    _fw_upper = str(framework or "").upper()
+    _dispatch_framework = "pqc" if "PQC" in _fw_upper else "vapt"
     all_findings = []
     resolved_ctrls = set()
     _seen_dedup_keys = set()
@@ -2162,7 +2298,7 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                 except Exception:
                     ftext = ""
 
-            actionable, info = parse_tool_file(fname, ftext or "", framework="vapt")
+            actionable, info = parse_tool_file(fname, ftext or "", framework=_dispatch_framework)
 
 
             # parse_tool_file's second return value differs by parser: a list of
@@ -2195,7 +2331,7 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                 
                 if raw_ocr and len(raw_ocr.strip()) > 10:
                     # Pass OCR text to Python tool parsers!
-                    actionable_ocr, info_ocr = parse_tool_file("ocr_" + fname + ".txt", raw_ocr, framework="vapt")
+                    actionable_ocr, info_ocr = parse_tool_file("ocr_" + fname + ".txt", raw_ocr, framework=_dispatch_framework)
                     info_ocr_list = info_ocr if isinstance(info_ocr, list) else []
                     ocr_findings = actionable_ocr + info_ocr_list
                     if ocr_findings:
@@ -2324,6 +2460,14 @@ def _run_fast_technical_vapt_bg(bg_key, files_data, selected_sls, file_registry=
                             description=f.get("description") or f.get("finding") or "",
                             gap_detected=f.get("finding") or f.get("description") or "",
                             relevance_score=f.get("relevance_score", 0),
+                            # The parser's real CVSS score, into the column that is
+                            # actually named for it. It was previously written ONLY as a
+                            # string into `evidence_found`, leaving `severity_score` at
+                            # its 0.0 default -- so the scanner-derived score (e.g. 8.6
+                            # for an SSRF) was computed, discarded, and then re-invented
+                            # downstream from the severity band alone. Every VAPT report
+                            # quoted a placeholder number rather than the assessed one.
+                            severity_score=_safe_float(f.get("severity_score")),
                             evidence_found=str(f.get("severity_score", 0.0)),
                             evidence_snippet=f.get("evidence_snippet") or f.get("evidence") or "",
                             recommendation=f.get("remediation") or f.get("recommendation", ""),

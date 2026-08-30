@@ -150,8 +150,19 @@ def test_unique_control_id_normal_matching():
 def test_same_control_id_ambiguous_question_handling(capsys):
     """
     Test that when multiple Excel rows share the same control ID but an ambiguous
-    control object has no row_index and no matching question text, it logs [SCOPING AMBIGUITY]
-    and safely sets file scope to empty [] without borrowing another row's files.
+    control object has no row_index and no matching question text, it logs
+    [SCOPING AMBIGUITY] and safely leaves the file scope empty without borrowing
+    another row's files.
+
+    The ambiguity was always detected -- _match_excel_row() returned (None, True) and
+    logged -- but the flag was never read. With no row matched, no Tier 1 refs were
+    collected, so the Tier 2/3 cascade ran and ended at the "no filename/keyword
+    match" fallback that hands the control EVERY uploaded file. The control was then
+    audited against evidence belonging to other rows' questions.
+
+    The control is now short-circuited before retrieval rather than invoked with an
+    empty list, so the graph is never called for it -- there is nothing to search and
+    no reason to spend an LLM call arriving at the same answer.
     """
     custom_evidence = {
         "excel_items": [
@@ -212,7 +223,17 @@ def test_same_control_id_ambiguous_question_handling(capsys):
 
     out = capsys.readouterr().out
     assert "[SCOPING AMBIGUITY]" in out
-    assert captured[ambiguous_c["control"]] == []
+    # Never handed another row's files -- the whole point of the guard.
+    assert ambiguous_c["control"] not in captured, (
+        f"control was audited against borrowed files: {captured.get(ambiguous_c['control'])}"
+    )
+    assert "scope left EMPTY" in out
+    # The final resolved scope for this control must be exactly empty. (Alpha.pdf
+    # still appears in the session_files debug line -- that lists what was uploaded,
+    # not what this control was given -- so assert on the scope line itself.)
+    scope_lines = [l for l in out.splitlines()
+                   if "[CONTROL FILE SCOPE]" in l and l.rstrip().endswith("[]")]
+    assert scope_lines, "no empty-scope line found; scope was not blocked"
 
 
 def test_missing_referenced_file_warning_preserved(capsys):

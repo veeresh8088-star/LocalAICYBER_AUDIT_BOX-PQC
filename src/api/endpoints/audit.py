@@ -212,6 +212,88 @@ class ImportAuditeeEvidenceRequest(BaseModel):
 
 # --- Endpoints ---
 
+# Marker written into AuditReport.status to hide a session from the user's list.
+# Deliberately reuses the existing status column so this needs no migration -- the
+# customer delivery is explicitly a no-schema-change release.
+_ARCHIVED_STATUS = "Archived"
+
+
+@router.delete("/sessions/{session_id}")
+def api_archive_session(session_id: str, request: Request):
+    """Archives a session: hidden from the user's list, retained in the ledger.
+
+    There was no delete route at all, and app.js never called one, so a session
+    could only ever accumulate. "Remove this from my list" is a function users
+    reasonably expect, and its absence pushed people toward deleting rows by hand.
+
+    This is an ARCHIVE, not a DELETE. An audit report, its findings and its
+    evidence are the record of an assessment that was performed -- destroying them
+    on a click would break the ledger the rest of the system is built on
+    (checkpoints, compliance scores, admin audit logs all reference report_id).
+    The same soft-delete-plus-undo shape already used for evidence files applies
+    here: the row stays, the status marks it archived, and the action is logged
+    and reversible via POST /sessions/{session_id}/restore.
+    """
+    auth_user = _require_auth(request)
+    db = SessionLocal()
+    try:
+        with force_master():
+            report = db.query(AuditReport).filter(AuditReport.session_id == session_id).first()
+            if not report:
+                raise HTTPException(status_code=404, detail="Session not found.")
+            _assert_session_access(db, report, auth_user)
+
+            if report.status == _ARCHIVED_STATUS:
+                return {"success": True, "message": "Session is already archived.",
+                        "session_id": session_id, "already_archived": True}
+
+            previous_status = report.status
+            report.status = _ARCHIVED_STATUS
+            db.commit()
+            log_system_event(
+                "SESSION_ARCHIVED", "INFO",
+                f"Session '{report.session_title}' archived (previous status: {previous_status})",
+                session_id=session_id, actor=auth_user.get("username"),
+            )
+            return {
+                "success": True,
+                "message": f"Session '{report.session_title}' archived. Findings and evidence are retained.",
+                "session_id": session_id,
+                "previous_status": previous_status,
+            }
+    finally:
+        db.close()
+
+
+@router.post("/sessions/{session_id}/restore")
+def api_restore_session(session_id: str, request: Request, status: str = "Draft"):
+    """Restores an archived session to the user's list."""
+    auth_user = _require_auth(request)
+    db = SessionLocal()
+    try:
+        with force_master():
+            report = db.query(AuditReport).filter(AuditReport.session_id == session_id).first()
+            if not report:
+                raise HTTPException(status_code=404, detail="Session not found.")
+            _assert_session_access(db, report, auth_user)
+
+            if report.status != _ARCHIVED_STATUS:
+                return {"success": True, "message": "Session is not archived.",
+                        "session_id": session_id, "status": report.status}
+
+            report.status = status or "Draft"
+            db.commit()
+            log_system_event(
+                "SESSION_RESTORED", "INFO",
+                f"Session '{report.session_title}' restored to '{report.status}'",
+                session_id=session_id, actor=auth_user.get("username"),
+            )
+            return {"success": True, "message": f"Session '{report.session_title}' restored.",
+                    "session_id": session_id, "status": report.status}
+    finally:
+        db.close()
+
+
 @router.post("/sessions")
 def api_create_session(
     request: Request,
@@ -321,7 +403,26 @@ def api_get_sessions(request: Request, username: Optional[str] = None):
         else:
             query = db.query(AuditReport).filter(AuditReport.created_by == username)
 
-        reports = query.order_by(AuditReport.created_at.desc()).all()
+        # Archived sessions are hidden from the list but never removed -- see
+        # api_archive_session. _ARCHIVED_STATUS is the marker.
+        query = query.filter(
+            (AuditReport.status.is_(None)) | (AuditReport.status != _ARCHIVED_STATUS)
+        )
+
+        # Read from MASTER, not a replica.
+        #
+        # api_create_session writes inside force_master(), but this is a separate
+        # request, so RoutingSession.get_bind() sent it to a slave -- and the
+        # master->slave sync runs on its own schedule. A user who created a session
+        # and immediately listed got an empty list back; confirmed by execution, the
+        # row was present in all three databases while this endpoint returned zero.
+        # The 10-second UI poll hid it, but "create then list" is exactly what a
+        # script or a fast click does.
+        #
+        # Safe to pin: the query is user-scoped and small, and it runs far less often
+        # than the 1-second /status poll that the replicas actually exist to absorb.
+        with force_master():
+            reports = query.order_by(AuditReport.created_at.desc()).all()
         result = []
         for r in reports:
             score_row = db.query(ComplianceScore).filter(ComplianceScore.report_id == r.id).first()
@@ -1177,9 +1278,15 @@ def api_start_audit(req: StartAuditRequest, request: Request):
         # Spawn Background Worker thread. Reservation (_bg_running / progress init)
         # already happened atomically with the "already running" check above.
         if is_tech_only:
+            # report_framework must reach the worker: PQC scans are technical-mode
+            # and so run through this same function, but parse_tool_file() disables
+            # the PQC parser whenever it is told the framework is VAPT. Without this
+            # the worker defaulted to "vapt" for every technical scan and no PQC
+            # finding could ever be produced.
             thread = threading.Thread(
                 target=_run_fast_technical_vapt_bg,
                 args=(bg_key, files_data, set(req.selected_sls), file_registry),
+                kwargs={"framework": report_framework},
                 daemon=True
             )
         else:
@@ -1497,11 +1604,23 @@ def api_get_findings(request: Request, session_id: str, saved_only: bool = False
             if p_val is None: p_val = "[]"
             if e_val is None: e_val = "[]"
 
+            # The assessed CVSS score. This field was absent from the findings
+            # response entirely, so the UI had nothing to render and fell back to a
+            # fixed number per severity band -- every High showed "CVSS 7.5"
+            # regardless of what the scanner actually assessed. Emitted as a float,
+            # or None when nothing was stored, so the client can tell "no score" from
+            # a real 0.0 (informational).
+            try:
+                _sev_score = float(f.severity_score) if f.severity_score else None
+            except (TypeError, ValueError):
+                _sev_score = None
+
             result.append({
                 "id": f.id,
                 "control_id": f.control_id,
                 "control_name": ctrl_name,
                 "severity": sev,
+                "severity_score": _sev_score,
                 "description": desc,
                 "evidence_found": f.evidence_found,
                 "evidence_snippet": f.evidence_snippet,
@@ -2574,8 +2693,19 @@ def api_export_docx(
             resolved_list = []
             for f in db_findings:
                 sev = f.severity or "Medium"
-                sev_score = 5.0
-                if "Critical" in sev or "1" in sev:
+                # Prefer the score the scanner/parser actually assessed. The band
+                # estimate below is a fallback for legacy rows saved before the score
+                # was persisted -- it must never override a real value, or an SSRF
+                # assessed at 8.6 is reported as a flat 8.0 purely because it fell in
+                # the "High" band.
+                _stored_score = 0.0
+                try:
+                    _stored_score = float(f.severity_score or 0.0)
+                except (TypeError, ValueError):
+                    _stored_score = 0.0
+                if _stored_score > 0:
+                    sev_score = _stored_score
+                elif "Critical" in sev or "1" in sev:
                     sev_score = 9.5
                 elif "High" in sev:
                     sev_score = 8.0

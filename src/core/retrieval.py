@@ -67,21 +67,28 @@ if os.path.exists(CACHE_FILE):
 # ── Native vector engine (sqlite-vec or pgvector) ────────────────────────────
 # Lazy-initialised on first retrieval call to allow DB to boot first.
 _native_vec_engine = None
-_native_vec_lock = concurrent.futures.ThreadPoolExecutor.__new__
+_native_vec_lock = threading.Lock()  # guards one-time lazy init of _native_vec_engine
 
 def _get_native_vec_engine():
-    """Lazy-initialises and returns the best available native vector engine."""
+    """Lazy-initialises and returns the best available native vector engine.
+
+    Double-checked lock pattern: the fast path (engine already set) runs without
+    acquiring the lock; the slow path (first call) acquires it and re-checks so
+    two concurrent first-callers never both run the potentially expensive init.
+    """
     global _native_vec_engine
     if _native_vec_engine is None:
-        try:
-            from src.db.database import engine_master
-            if engine_master is not None and engine_master.dialect.name == "postgresql":
-                _native_vec_engine = _init_pgvector(engine_master)
-            else:
-                _native_vec_engine = _init_sqlite_vec()
-        except Exception as e:
-            print(f"[VEC SEARCH] Engine init failed ({e}); using Python cosine.", flush=True)
-            _native_vec_engine = "python"  # sentinel: use Python fallback
+        with _native_vec_lock:
+            if _native_vec_engine is None:  # re-check inside the lock
+                try:
+                    from src.db.database import engine_master
+                    if engine_master is not None and engine_master.dialect.name == "postgresql":
+                        _native_vec_engine = _init_pgvector(engine_master)
+                    else:
+                        _native_vec_engine = _init_sqlite_vec()
+                except Exception as e:
+                    print(f"[VEC SEARCH] Engine init failed ({e}); using Python cosine.", flush=True)
+                    _native_vec_engine = "python"  # sentinel: use Python fallback
     return _native_vec_engine
 
 def _init_sqlite_vec():
@@ -650,6 +657,11 @@ def _calculate_dynamic_context_budget(controls_batch, mode="standard"):
     FALLBACK_TARGET, FALLBACK_HARD_MAX = 3000, 5000
     CHAT_WRAPPER_TOKENS = 26          # measured: Gemma's <start_of_turn>... wrapper
     SAFETY_MARGIN_TOKENS = 300        # absorbs the chunk-selection char/4 estimate's imprecision
+    # Floor for a starved slot. Not a target -- just enough for retrieval to
+    # still select something so the audit runs and the warning below is seen,
+    # rather than returning a negative budget and silently retrieving nothing.
+    # audit_chains.py's trim backstop enforces the real slot size afterwards.
+    MIN_USABLE_EVIDENCE_TOKENS = 512
 
     try:
         from src.core.llm_client import count_tokens, get_real_num_ctx
@@ -679,7 +691,25 @@ def _calculate_dynamic_context_budget(controls_batch, mode="standard"):
             template_tokens + CHAT_WRAPPER_TOKENS + fields_tokens + feedback_tokens
             + COMPLETION_RESERVE_TOKENS + SAFETY_MARGIN_TOKENS
         )
-        hard_max = max(FALLBACK_HARD_MAX, num_ctx - overhead)
+        # The real evidence budget this slot can honour. This was previously
+        # max(FALLBACK_HARD_MAX, num_ctx - overhead), which clamped UPWARD: on a
+        # slot too small to hold the prompt at all, (num_ctx - overhead) came out
+        # negative and the function still reported 5000. The caller then packed
+        # 5000 tokens of evidence into a slot with no room for it, and
+        # llama-server silently discarded the overflow -- evidence vanished with
+        # no error and findings were decided on a fraction of the document.
+        # Report the truth instead; a starved budget is a condition to surface,
+        # not to paper over.
+        hard_max = num_ctx - overhead
+        if hard_max < MIN_USABLE_EVIDENCE_TOKENS:
+            print(
+                f"[TOKEN BUDGET] WARNING: slot context {num_ctx} leaves only {hard_max} token(s) "
+                f"for evidence after {overhead} of overhead (minimum usable: {MIN_USABLE_EVIDENCE_TOKENS}). "
+                f"Evidence WILL be trimmed and findings may be decided on partial documents. "
+                f"Raise MIN_CTX_PER_REQUEST on the llama-server side.",
+                flush=True
+            )
+            hard_max = MIN_USABLE_EVIDENCE_TOKENS
         target = int(hard_max * 0.7)
 
         print(

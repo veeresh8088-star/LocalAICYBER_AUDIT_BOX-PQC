@@ -43,10 +43,23 @@ services:
     restart: always
 
   llm:
-    image: aicyberauditbox-llm:3.10
+    image: aicyberauditbox-llm:3.21
     container_name: aicyberauditbox_llm
     environment:
       - LLM_MODE=completion
+      # Tokens each request may use. 16384 admits only ~14 of the 30 passages
+      # Deep-mode retrieval produces; 32768 clears all 30 with headroom. The
+      # entrypoint sizes slots from this container's RAM and sets
+      # -c = slots x this value.  RAM ~= 4.5GB + slots x 1.92GB
+      - MIN_CTX_PER_REQUEST=32768
+    #
+    # Slots are bounded by this container's RAM and by CPU cores. With no
+    # mem_limit the RAM detection falls back to the HOST total, so on a large
+    # server the LLM sizes as if it owned the machine and crowds out the app,
+    # database and embedding server. Budget:
+    #   4.5GB (model + base) + slots x 1.92GB (KV at 32k, 8-bit)
+    #   10 concurrent auditors -> 12 slots -> ~28GB
+    # mem_limit: 28g
       # LLM_THREADS intentionally NOT set here -- the container auto-detects
       # its actual CPU allowance (cgroup quota, or the host's full core
       # count if uncapped) and uses all of it by default, so this is correct
@@ -60,7 +73,7 @@ services:
     restart: always
 
   llm-embed:
-    image: aicyberauditbox-llm-embed:3.10
+    image: aicyberauditbox-llm-embed:3.21
     container_name: aicyberauditbox_llm_embed
     environment:
       - LLM_MODE=embedding
@@ -70,7 +83,7 @@ services:
     restart: always
 
   app:
-    image: aicyberauditbox-app:3.16
+    image: aicyberauditbox-app:3.21
     container_name: aicyberauditbox_app
 
     network_mode: "service:shakthidb"
@@ -87,6 +100,10 @@ services:
       - LLM_BACKEND=llama.cpp
       - LLM_HOSTS=llm:11434
       - EMBEDDING_HOST=http://llm-embed:11435
+      # Must equal the llm service's MIN_CTX_PER_REQUEST. With --kv-unified,
+      # llama-server reports the whole shared pool as each slot's n_ctx, so the
+      # app would size every prompt as though it owned the entire buffer.
+      - LLM_NUM_CTX=32768
       - REDIS_URL=redis://redis:6379/0
       # This deployment must use ShaktiDB -- never silently fall back to the
       # container-local SQLite file (see database.py's except branch).
@@ -101,6 +118,24 @@ services:
       # guarantee and risks leaking customer audit data off their network.
       # SENTRY_DSN is for docker-compose.yml (your own internal/dev/staging
       # use) only. See qa/monitoring/README.md.
+      #
+      # Concurrent audit limits.
+      #
+      # Left UNSET on purpose: the global cap now sizes itself from this
+      # machine's physical core count (roughly one audit per two cores, floored
+      # at 2, capped at 16). Slots decide how many audits can start; cores decide
+      # whether they finish.
+      #
+      # These were previously pinned to 30/60 for benchmark testing. On a
+      # 4-physical-core host that admits far more work than the machine can
+      # complete -- measured: three concurrent single-control audits were all
+      # still running after 900 seconds having finished nothing, while one audit
+      # alone takes about five minutes. Every audit is accepted, the interface
+      # shows them all running, and no result arrives. A refusal is better.
+      #
+      # Uncomment to pin your own values after measuring on your hardware:
+      # - MAX_AUDITS_PER_AUDITOR=2
+      # - MAX_CONCURRENT_AUDITS=8
     volumes:
       - app_data:/app/data
     restart: always

@@ -114,9 +114,26 @@ EXPOSE 8000
 #    docker/wait_for_postgres.py for why this exists instead of relying on
 #    database.py's own fallback behavior).
 # 3. Start the API.
+# The .generated_env source is GUARDED, not unconditional.
+#
+# generate_secrets.sh writes that file only when it had to generate a secret. If
+# the operator set JWT_SECRET in the compose environment -- which
+# docker-compose.customer.yml explicitly offers ("Uncomment to pin one yourself
+# instead") -- the script correctly treats the explicit value as authoritative and
+# exits without writing anything. The unguarded `. /app/data/.generated_env` that
+# followed then failed with "sh: 1: .: cannot open /app/data/.generated_env", the
+# && chain broke, and the container exited before uvicorn ever started.
+#
+# So following the documented instruction to pin your own secret produced a
+# container that would not boot. Verified by execution: identical image, boots
+# without JWT_SECRET, dies instantly with it.
+#
+# `|| true` keeps the chain alive when the file is absent; JWT_SECRET is already
+# in the environment in that case, so the export below still does its job. The
+# operator's own secret is deliberately NOT written to the volume.
 CMD ["sh", "-c", "\
     ./docker/generate_secrets.sh && \
-    . /app/data/.generated_env && \
+    { [ -f /app/data/.generated_env ] && . /app/data/.generated_env || true; } && \
     export JWT_SECRET && \
     python docker/wait_for_postgres.py && \
     python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 \

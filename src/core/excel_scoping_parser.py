@@ -52,7 +52,16 @@ _DIRECT_KEYWORD_CONTROL_MAP = [
     (["log archival", "log archived", "archiv", "records retention", "records management"], "5.33 Protection of Records"),
     (["backup", "recovery", "restore"], "8.13 Information Backup"),
     (["incident", "response", "breach"], "5.24 Information Security Incident Management Planning and Preparation"),
-    (["encryption", "tls", "ssl", "cipher"], "8.24 Use of Cryptography"),
+    # Matching is word-boundary anchored, so each surface form has to be listed:
+    # "encryption" cannot match "encrypted", and the control's own name --
+    # "Use of Cryptography" -- was itself unmatchable because neither
+    # "cryptography" nor "cryptographic" appeared here. A checklist row reading
+    # "Cryptographic Controls" therefore resolved to nothing under ISO, and
+    # before framework confinement it reached SOC 2 CC3.4 instead.
+    (["encryption", "encrypted", "encrypt", "cryptography", "cryptographic",
+      "cryptographic controls", "key management", "key rotation", "kms",
+      "tls", "ssl", "cipher", "aes", "data at rest", "data in transit"],
+     "8.24 Use of Cryptography"),
     (["password", "credential", "secret"], "5.17 Authentication Information"),
     (["firewall", "network security", "network traffic", "firewall policy"], "8.20 Network Security"),
     (["gdpr", "pii", "personal data", "privacy"], "5.34 Privacy and Protection of Personally Identifiable Information (Pii)"),
@@ -186,11 +195,40 @@ def _resolve_control_by_direct_map(text: str, use_cases: List[Dict]) -> Optional
 
 
 
-# ── Known ISO 27001 & VAPT control short-IDs (matches 5.15, 8.17, VAPT-1 .. VAPT-15)
+# ── Control short-IDs across every framework in USE_CASES.
+#
+# This previously matched only "N.N" (ISO) and "VAPT-N", so Step 1 of
+# _resolve_control() -- the exact control-ID lookup -- was dead for five of the
+# eight frameworks. Their IDs simply never matched, and resolution silently fell
+# through to fuzzy name matching. Two consequences, both confirmed by running the
+# resolver over all 217 controls:
+#
+#   * An Excel checklist carrying only a Control-ID column resolved 1/15 for DPDP,
+#     1/12 for PQC, 1/23 for XBOM, 1/4 for BCMS and 9/33 for SOC 2.
+#   * With ID matching unavailable, the name matcher crossed framework boundaries:
+#     NIST "PR.AT" resolved to ISO 6.3 and "RS.MA" to ISO 5.24 -- auditing a NIST
+#     control against a different framework's text and expected evidence.
+#
+# ID matching short-circuits before the name matcher, so covering every real shape
+# fixes both. The alternation is ordered longest-prefix-first: the alpha-dash
+# families must be tried before the bare numeric pattern, or "XBOM-7" would match
+# nothing while a stray "6.1" inside free text won as an ISO clause.
+#
+# Shapes present in USE_CASES: N.N (ISO, 93) | CCN.N (SOC 2, 33) | XBOM-N (23)
+# | VAPT-N (15) | DPDP-N (15) | PQC-N (12) | BCMS-N (4) | XX.YY (NIST CSF, 22).
 _CONTROL_ID_RE = re.compile(
-    r'\b(VAPT\s*-?\s*\d{1,2}|\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)\b',
+    r'\b('
+    r'(?:VAPT|DPDP|PQC|XBOM|BCMS)\s*-?\s*\d{1,3}'   # VAPT-1, DPDP-15, XBOM-23, PQC-5, BCMS-2
+    r'|CC\d(?:\.\d{1,2})?'                          # SOC 2: CC6, CC6.1
+    r'|(?:GV|ID|PR|DE|RS|RC)\.[A-Z]{2}'             # NIST CSF: GV.OC, PR.AT, RS.MA
+    r'|\d{1,2}\.\d{1,2}(?:\.\d{1,2})?'              # ISO 27001: 5.1, 8.17, 8.17.1
+    r')\b',
     re.IGNORECASE
 )
+
+# Frameworks whose IDs are written "<PREFIX>-<number>". Normalised to a single
+# canonical dash so "dpdp 3", "DPDP3" and "DPDP - 3" all reach "DPDP-3".
+_DASHED_ID_PREFIXES = ("VAPT", "DPDP", "PQC", "XBOM", "BCMS")
 
 
 def _normalize(text: str) -> str:
@@ -238,7 +276,14 @@ def _resolve_control_by_id(text: str, use_cases: List[Dict]) -> Optional[Dict]:
         return None
     matches = _CONTROL_ID_RE.findall(str(text))
     for m in matches:
-        m_norm = re.sub(r'vapt\s*-?\s*', 'VAPT-', m, flags=re.IGNORECASE).strip().upper()
+        # Canonicalise "<PREFIX> <n>" / "<PREFIX>-<n>" / "<PREFIX><n>" to "PREFIX-n".
+        # This handled VAPT alone before; the other dashed families fell through
+        # unnormalised and only matched when the sheet already used the exact form.
+        m_norm = m.strip().upper()
+        for prefix in _DASHED_ID_PREFIXES:
+            m_norm = re.sub(
+                rf'^{prefix}\s*-?\s*(\d+)$', rf'{prefix}-\1', m_norm, flags=re.IGNORECASE
+            )
         for uc in use_cases:
             uc_id = str(uc.get("use_case", "")).split(" ")[0].upper()
             if uc_id == m_norm or uc_id == m.upper():
@@ -327,6 +372,49 @@ def _resolve_control_by_embedding(text: str, use_cases: List[Dict]) -> Optional[
     except Exception as e:
         print(f"[EXCEL SCOPING] Embedding resolution failed: {e}", flush=True)
         return None
+_STANDARD_ALIASES = {
+    "ISO 27001": ("iso", "27001", "isms"),
+    "SOC2":      ("soc2", "soc 2"),
+    "XBOM":      ("xbom", "x-bom", "sbom"),
+    "NIST CSF 2.0": ("nist", "csf"),
+    "VAPT":      ("vapt", "pentest", "penetration"),
+    "DPDP":      ("dpdp", "gdpr", "privacy"),
+    "PQC":       ("pqc", "post-quantum", "quantum"),
+    "BCMS":      ("bcms", "continuity", "22301"),
+}
+
+
+def filter_use_cases_by_framework(use_cases: List[Dict], framework: str) -> List[Dict]:
+    """Narrows the candidate controls to the framework the audit is actually running.
+
+    Without this, a checklist row carrying no control ID is matched by name or
+    question against all 217 controls from all eight frameworks. The ID matcher
+    was fixed to respect framework boundaries, but the name and question matchers
+    below it were not -- so an ISO checklist row reading "Cryptographic Controls"
+    resolved to SOC 2 "CC3.4 Identification of Changes Impacting Controls"
+    instead of ISO "8.24 Use of Cryptography", and the auditor's crypto policy
+    and evidence were then judged against a change-management requirement.
+
+    An unrecognised or empty framework returns the list unchanged, so callers
+    that do not know the framework behave exactly as before.
+    """
+    if not framework or not use_cases:
+        return use_cases
+    fw = str(framework).strip().lower()
+    target = None
+    for std, aliases in _STANDARD_ALIASES.items():
+        if any(a in fw for a in aliases):
+            target = std
+            break
+    if not target:
+        return use_cases
+    narrowed = [u for u in use_cases if str(u.get("standard", "")).strip() == target]
+    # Never hand back an empty candidate set -- a filter that matches nothing
+    # would make every row unresolvable, which is worse than cross-framework
+    # matching. Fall back to the full list and let the matchers try.
+    return narrowed or use_cases
+
+
 def _resolve_control(
     id_text: str = "",
     name_text: str = "",
@@ -511,7 +599,8 @@ def _detect_question_column(header_row: list) -> int:
 def parse_excel_scoping_checklist(
     file_path: str,
     sheet_name: str = None,
-    uploaded_filenames: List[str] = None
+    uploaded_filenames: List[str] = None,
+    framework: str = None
 ) -> List[Dict]:
     """
     Parse an Excel scoping checklist and return a list of checklist items.
@@ -562,6 +651,14 @@ def parse_excel_scoping_checklist(
         file_col_roles = _get_file_column_roles(header_row, file_cols)
 
         use_cases = _load_use_cases()
+        # Confine matching to the framework this audit is running, so a row with
+        # no control ID cannot resolve into a different standard's control set.
+        if framework:
+            _before = len(use_cases)
+            use_cases = filter_use_cases_by_framework(use_cases, framework)
+            if len(use_cases) != _before:
+                print(f"[EXCEL PARSER] Framework '{framework}': matching against "
+                      f"{len(use_cases)} of {_before} controls.", flush=True)
         items = []
 
         for row_idx, row in enumerate(rows[header_row_idx + 1:], start=header_row_idx + 2):

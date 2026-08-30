@@ -194,6 +194,11 @@ def _ensure_llama_server_running(port=11434):
 
 _real_num_ctx_cache = {}
 
+# Conservative last resort when the server can't be asked. Deliberately small:
+# under-reading the context trims evidence (visible, warned about), while
+# over-reading it makes llama-server silently discard the overflow.
+_FALLBACK_NUM_CTX = 4096
+
 
 def get_real_num_ctx(host=None, timeout=10):
     """
@@ -231,10 +236,23 @@ def get_real_num_ctx(host=None, timeout=10):
                 _real_num_ctx_cache[resolved_host] = n_ctx
                 return n_ctx
     except Exception as e:
-        pass
+        print(f"[LLM CTX] /props query to {resolved_host} failed: {e}", flush=True)
 
-    _real_num_ctx_cache[resolved_host] = 4096
-    return 4096
+    # Loud on purpose. Every prompt in the app is sized against whatever this
+    # returns, so a silent fallback throttles all audits to 4096 tokens even
+    # when the server offers far more -- and the only symptom is trimmed
+    # evidence and wrong findings. The fallback path used to print nothing at
+    # all, making that indistinguishable from a genuinely small slot. Cached
+    # per host, so this warns once rather than on every control.
+    print(
+        f"[LLM CTX] WARNING: no usable per-slot n_ctx from {resolved_host}/props -- "
+        f"falling back to {_FALLBACK_NUM_CTX}. If the server actually offers more, every "
+        f"audit is being throttled to this figure. Set LLM_NUM_CTX to override, or check "
+        f"whether this llama.cpp build still reports default_generation_settings.n_ctx.",
+        flush=True
+    )
+    _real_num_ctx_cache[resolved_host] = _FALLBACK_NUM_CTX
+    return _FALLBACK_NUM_CTX
 
 
 def count_tokens(text, host=None, timeout=1.5):
@@ -274,7 +292,14 @@ def query_llm(prompt, model, format=None, num_ctx=16384, temperature=0.0, num_th
         except Exception:
             timeout = 600
 
-    with port_pool_manager.acquire_control_slot(session_id=session_id, timeout=timeout) as host:
+    # Two budgets, not one. Passing `timeout` to both the slot acquisition and the
+    # HTTP request meant a request that waited a long time for a worker still had
+    # its own full budget here, but the LangGraph wrapper above timed the pair
+    # together -- so queue time came out of compute time and a request that would
+    # have completed was killed. Waiting for a slot is a queueing problem with its
+    # own, much shorter, deadline; the request itself keeps the full budget.
+    _pool_timeout = int(os.environ.get("LLM_POOL_WAIT_TIMEOUT_SEC", "300"))
+    with port_pool_manager.acquire_control_slot(session_id=session_id, timeout=_pool_timeout) as host:
         if "gemma" in model.lower():
             prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         url = f"{host}/completion"

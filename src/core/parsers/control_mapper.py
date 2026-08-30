@@ -70,6 +70,39 @@ def get_dedup_key(title: str, target: str, cve_list: Optional[List[str]] = None,
         return f"plugin:{str(plugin_id).strip()}|target:{t_clean}"
     return f"title:{(title or '').strip().lower()}|target:{t_clean}"
 
+# Ordered OWASP Top 10 (2021) keyword rules -- first match wins, so the more
+# specific vulnerability classes are listed before the broader ones. Applied to the
+# finding title first and only then to title+description (see map_finding_to_owasp).
+_OWASP_KEYWORD_RULES = (
+    ("A03:2021 Injection", (
+        "xss", "cross-site scripting", "cross site scripting", "sqli", "sql injection",
+        "command injection", "os command", "ldap injection", "xpath injection",
+        "code injection", "xxe", "xml external entity", "template injection",
+    )),
+    ("A10:2021 Server-Side Request Forgery (SSRF)", (
+        "ssrf", "server-side request forgery", "server side request forgery",
+    )),
+    ("A01:2021 Broken Access Control", (
+        "access control", "privilege escalation", "directory traversal",
+        "path traversal", "idor", "insecure direct object", "cors",
+        "forced browsing", "unauthorized access",
+    )),
+    ("A02:2021 Cryptographic Failures", (
+        "weak cipher", "weak encryption", "ssl", "tls", "hsts", "plaintext",
+        "cleartext", "unencrypted", "self-signed", "certificate expired",
+        "sweet32", "poodle", "beast", "lucky13", "deprecated algorithm",
+    )),
+    ("A06:2021 Vulnerable and Outdated Components", (
+        "outdated", "end of life", "end-of-life", "eol", "unpatched", "obsolete",
+        "unsupported version", "known vulnerable",
+    )),
+    ("A07:2021 Identification & Auth Failures", (
+        "authentication", "password", "session", "credential", "jwt",
+        "brute force", "mfa", "2fa", "multi-factor",
+    )),
+)
+
+
 def map_finding_to_owasp(cwe_id: Optional[str], title: str, desc: str) -> str:
     """
     100% Deterministic OWASP Top 10 Mapper via static CWE tables.
@@ -79,20 +112,36 @@ def map_finding_to_owasp(cwe_id: Optional[str], title: str, desc: str) -> str:
         if cwe_clean in CWE_TO_OWASP_MAP:
             return CWE_TO_OWASP_MAP[cwe_clean]
             
+    # No CWE. In practice that is the normal case, not the exception: none of the
+    # real scanner exports in VAPT/ carries a single CWE id, so this keyword pass
+    # -- not the table above -- is what actually classifies production findings.
+    #
+    # It therefore has to be right about two things it previously got wrong.
+    #
+    # 1) The TITLE names the vulnerability; the description explains how it is
+    #    exploited, and routinely names OTHER vulnerability classes while doing so.
+    #    Searching both as one blob let that prose win. Confirmed on a real Burp
+    #    export: "Missing Secure/HttpOnly Flags on Session Cookies" was classified
+    #    A03 Injection because its description reads "Attackers can steal these
+    #    cookies via Cross-Site Scripting (XSS) or man-in-the-middle attacks".
+    #    Remediation text does the same. So: classify on the title, and consult the
+    #    description only when the title carries no signal at all.
+    #
+    # 2) Scanners spell things out. "xss" alone missed "Cross-site scripting
+    #    (DOM-based)", which then fell through every branch to the A05 default --
+    #    so two XSS findings in one report landed in two different categories.
+    #
+    # "authentication" replaces the old bare "auth", which also matched "author"
+    # and "authorized" in unrelated findings.
+    for category, keywords in _OWASP_KEYWORD_RULES:
+        if any(k in (title or "").lower() for k in keywords):
+            return category
+
     combined = f"{(title or '').lower()} {(desc or '').lower()}"
-    if any(k in combined for k in ("xss", "sqli", "sql injection", "command injection", "ldap injection")):
-        return "A03:2021 Injection"
-    if any(k in combined for k in ("access control", "privilege escalation", "directory traversal", "cors", "idor")):
-        return "A01:2021 Broken Access Control"
-    if any(k in combined for k in ("weak cipher", "ssl", "tls", "plaintext", "unencrypted", "hsts")):
-        return "A02:2021 Cryptographic Failures"
-    if any(k in combined for k in ("outdated", "end of life", "eol", "unpatched")):
-        return "A06:2021 Vulnerable and Outdated Components"
-    if any(k in combined for k in ("auth", "password", "session", "credential", "jwt")):
-        return "A07:2021 Identification & Auth Failures"
-    if any(k in combined for k in ("ssrf", "server-side request forgery")):
-        return "A10:2021 Server-Side Request Forgery (SSRF)"
-        
+    for category, keywords in _OWASP_KEYWORD_RULES:
+        if any(k in combined for k in keywords):
+            return category
+
     return "A05:2021 Security Misconfiguration"
 
 def map_finding_to_control(finding: Finding) -> str:
@@ -289,6 +338,74 @@ _PII_PATTERNS = [
     re.compile(r'(?:ssn|social\s+security|credit\s+card|card\s+number|pan\s+number|aadhaar)', re.IGNORECASE),  # PII identifiers
 ]
 
+# ── Keyword fallback, used only when no CVSS vector is available ────────────
+# Matched on word boundaries, never as bare substrings. The previous plain
+# `k in text` form meant "dos" matched inside any word containing it -- and
+# because a finding's description carries raw HTTP captures, base64 session
+# cookies (AWSALBCORS=a9a62VnhJoODUmGeknITOV4w...) hit it routinely and marked
+# A:HIGH on findings with no availability impact at all. "token" and "sensitive"
+# had the same exposure against ordinary response headers.
+_C_HIGH_KEYWORDS = (
+    "information disclosure", "data leak", "sensitive", "credential",
+    "password", "token", "private key", "directory listing",
+    "source code", "backup file", "database dump", "pii",
+    # Classes that were entirely absent, so every one of them reported
+    # C:NONE regardless of severity:
+    "ssrf", "server-side request forgery", "external service interaction",
+    "idor", "insecure direct object", "broken access control",
+    "path traversal", "directory traversal", "local file inclusion", "lfi",
+    "xxe", "xml external entity", "arbitrary file read",
+)
+_C_MEDIUM_KEYWORDS = (
+    "version disclosure", "banner", "stack trace", "error message",
+    "server header", "configuration",
+)
+_I_HIGH_KEYWORDS = (
+    "injection", "sqli", "xss", "csrf", "command injection",
+    "code execution", "rce", "file upload", "deserialization",
+    # Missing classes, as above:
+    "ssti", "template injection", "broken access control",
+    "privilege escalation", "arbitrary file write", "mass assignment",
+)
+_I_MEDIUM_KEYWORDS = ("open redirect", "clickjacking", "header injection")
+_A_HIGH_KEYWORDS = (
+    "denial of service", "dos", "ddos", "buffer overflow",
+    "resource exhaustion", "crash", "memory corruption",
+)
+
+
+def _kw_hit(text: str, keywords) -> bool:
+    """True when any keyword occurs in text as a whole word/phrase.
+
+    Word-boundary anchored so short tokens ("dos", "rce", "lfi", "xss") cannot
+    match inside unrelated strings -- see the note above the keyword tables.
+    """
+    if not text:
+        return False
+    for kw in keywords:
+        if re.search(r'(?<![a-z0-9])' + re.escape(kw) + r'(?![a-z0-9])', text):
+            return True
+    return False
+
+
+_CVSS_METRIC_RE = re.compile(r'\bC:([NLH])\/I:([NLH])\/A:([NLH])\b', re.IGNORECASE)
+_CVSS_METRIC_NAMES = {"N": "NONE", "L": "LOW", "H": "HIGH"}
+
+
+def _cia_from_cvss_vector(vector: str):
+    """Reads the C/I/A metrics straight out of a CVSS 3.1 vector string.
+
+    Returns (c, i, a) as display words, or None when the vector is absent or
+    malformed -- in which case the caller falls back to keyword inference.
+    """
+    if not vector:
+        return None
+    m = _CVSS_METRIC_RE.search(vector)
+    if not m:
+        return None
+    return tuple(_CVSS_METRIC_NAMES[g.upper()] for g in m.groups())
+
+
 def evaluate_cia_and_pii_impact(finding: Finding) -> tuple:
     """
     Evaluates CIA (Confidentiality, Integrity, Availability) impact and
@@ -332,37 +449,42 @@ def evaluate_cia_and_pii_impact(finding: Finding) -> tuple:
         i_impact = "HIGH"   # Signature forgery: ECC/RSA signatures are breakable
         # a_impact stays NONE — algorithm weakness alone doesn't cause DoS
 
+    # ── CVSS vector is authoritative when the parser produced one ────────────
+    # The keyword rules below are a last resort, not the primary source. Every
+    # scanner parser already emits a CVSS 3.1 vector whose C/I/A metrics come
+    # from the scanner's own classification, and re-deriving impact by keyword
+    # produced results that contradicted it: an SSRF finding scored High was
+    # displayed as "C:NONE | I:NONE | A:NONE", a combination that scores 0.0
+    # under CVSS 3.1 and so cannot coexist with a High rating. Two independent
+    # sources of truth for the same fact is the defect; the vector wins.
+    _vector_cia = _cia_from_cvss_vector(getattr(finding, "cvss_vector", "") or "")
+    if _vector_cia:
+        v_c, v_i, v_a = _vector_cia
+        # PQC's own override above is domain knowledge the vector doesn't carry,
+        # so it is preserved where it already raised a metric.
+        c_impact = v_c if c_impact == "NONE" else c_impact
+        i_impact = v_i if i_impact == "NONE" else i_impact
+        a_impact = v_a
+        if is_pii:
+            c_impact = "Confidential (High - PII Data Present)"
+        return f"C:{c_impact} | I:{i_impact} | A:{a_impact}", is_pii
+
     # Confidentiality indicators (generic — only applied if not already set by PQC block)
     if c_impact == "NONE":
-        if is_pii or any(k in combined_lower for k in (
-            "information disclosure", "data leak", "sensitive", "credential",
-            "password", "token", "private key", "directory listing",
-            "source code", "backup file", "database dump", "pii"
-        )):
+        if is_pii or _kw_hit(combined_lower, _C_HIGH_KEYWORDS):
             c_impact = "HIGH"
-        elif any(k in combined_lower for k in (
-            "version disclosure", "banner", "stack trace", "error message",
-            "server header", "configuration"
-        )):
+        elif _kw_hit(combined_lower, _C_MEDIUM_KEYWORDS):
             c_impact = "MEDIUM"
 
     # Integrity indicators (generic — only applied if not already set by PQC block)
     if i_impact == "NONE":
-        if any(k in combined_lower for k in (
-            "injection", "sqli", "xss", "csrf", "command injection",
-            "code execution", "rce", "file upload", "deserialization"
-        )):
+        if _kw_hit(combined_lower, _I_HIGH_KEYWORDS):
             i_impact = "HIGH"
-        elif any(k in combined_lower for k in (
-            "open redirect", "clickjacking", "header injection"
-        )):
+        elif _kw_hit(combined_lower, _I_MEDIUM_KEYWORDS):
             i_impact = "MEDIUM"
 
     # Availability indicators
-    if any(k in combined_lower for k in (
-        "denial of service", "dos", "ddos", "buffer overflow",
-        "resource exhaustion", "crash", "memory corruption"
-    )):
+    if _kw_hit(combined_lower, _A_HIGH_KEYWORDS):
         a_impact = "HIGH"
     elif any(k in combined_lower for k in (
         "rate limit", "timeout", "slow"

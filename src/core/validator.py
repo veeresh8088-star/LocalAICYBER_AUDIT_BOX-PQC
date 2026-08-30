@@ -50,18 +50,52 @@ class EvidenceItem:
 
 def check_grounding(evidence, document_text):
     """
-    Checks if the cited evidence actually exists in the provided document text.
+    Checks whether the cited evidence actually exists in the provided document text.
+
+    Verifies the WHOLE quote, not a prefix of it. This used to test only
+    `evidence[:50]` -- so a quote could open with 50 real characters and continue
+    into entirely invented content (dates, approvals, retention periods) and still
+    be returned as GROUNDED. Confirmed by execution: a 139-character quote whose
+    last 89 characters were fabricated returned "GROUNDED".
+
+    Multi-excerpt quotes (joined by a blank line, as the generator emits them) are
+    verified independently, mirroring GATE 2 in validate_only(): a run of separate
+    sentences from different parts of a document never appears as one continuous
+    block, so checking the joined blob as a single string would always fail.
+
+    Returns "GROUNDED" only when every excerpt is found. When some but not all
+    excerpts verify, returns "PARTIALLY_GROUNDED" -- callers treat anything other
+    than GROUNDED/GROUNDED_WITH_OCR_WARNING as unsupported, which is the safe
+    direction for a partially fabricated quote.
     """
-    if not evidence or evidence == "NOT_FOUND":
+    if not evidence or evidence == "NOT_FOUND" or not document_text:
         return "NOT_GROUNDED"
-    
-    # Fuzzy check - first 50 chars matching (case-insensitive)
-    snippet = evidence[:50].lower().strip().strip('"').strip("'").strip('“').strip('”')
-    if not snippet:
+
+    excerpts = [e.strip() for e in str(evidence).split("\n\n") if e.strip()]
+    if not excerpts:
         return "NOT_GROUNDED"
-        
-    if snippet not in _cached_doc_lower(document_text):
+
+    norm_doc = _cached_normalize_doc(document_text)
+    alpha_doc = clean_alphanumeric(document_text)
+
+    verified = 0
+    for excerpt in excerpts:
+        cleaned = excerpt.strip().strip('"').strip("'").strip('“').strip('”').strip()
+        if not cleaned or cleaned.upper() == "NOT_FOUND":
+            continue
+        norm_item = normalize_text(cleaned)
+        if norm_item and norm_item in norm_doc:
+            verified += 1
+            continue
+        # Encoding / smart-quote tolerance, same fallback GATE 2 uses.
+        alpha_item = clean_alphanumeric(cleaned)
+        if alpha_item and alpha_item in alpha_doc:
+            verified += 1
+
+    if verified == 0:
         return "NOT_GROUNDED"
+    if verified < len(excerpts):
+        return "PARTIALLY_GROUNDED"
     return "GROUNDED"
 
 
@@ -419,6 +453,28 @@ def map_new_schema_to_legacy(finding):
     mapped["severity"] = sev_map.get(sev_key.upper(), "N/A")
     
     # 3. evidence quote mapping
+    #
+    # A model that has no quote to give does not always say "NOT_FOUND" -- it
+    # writes "None", "N/A", "null" or an empty placeholder. Those were kept as
+    # if they were real quotes, and the grounding gate then tried to locate the
+    # word "None" verbatim in the source document. It is not there, so the
+    # finding was marked NOT_GROUNDED and forced to NON_COMPLIANT -- even where
+    # policy_status and evidence_status were both FOUND and both assessed
+    # COMPLIANT, and the real evidence was sitting in evidence_snippet. That is
+    # a false non-compliance caused by a missing field, not by absent evidence.
+    #
+    # Treating these as "no quote supplied" routes the finding down the honest
+    # NOT_FOUND path instead, where the policy/evidence status logic decides the
+    # outcome rather than a failed substring search.
+    _PLACEHOLDER_QUOTES = {
+        "", "none", "n/a", "na", "null", "nil", "not found", "not_found",
+        "no evidence", "no quote", "not applicable", "not provided",
+        "unavailable", "unknown", "-", "--",
+    }
+
+    def _is_placeholder(text) -> bool:
+        return str(text or "").strip().strip('."\'').lower() in _PLACEHOLDER_QUOTES
+
     evidence_list = finding.get("evidence", [])
     evidence_quote = "NOT_FOUND"
     if evidence_list and isinstance(evidence_list, list):
@@ -427,12 +483,20 @@ def map_new_schema_to_legacy(finding):
         for ev_item in evidence_list:
             if isinstance(ev_item, dict):
                 excerpt = ev_item.get("excerpt") or ev_item.get("text") or ""
-                if excerpt and excerpt != "NOT_FOUND":
+                if excerpt and not _is_placeholder(excerpt):
                     all_excerpts.append(excerpt.strip())
-            elif isinstance(ev_item, str) and ev_item.strip():
+            elif isinstance(ev_item, str) and ev_item.strip() and not _is_placeholder(ev_item):
                 all_excerpts.append(ev_item.strip())
         if all_excerpts:
             evidence_quote = "\n\n".join(all_excerpts)
+
+    # The quote may also arrive as a flat field rather than the evidence list.
+    if evidence_quote == "NOT_FOUND":
+        _flat = finding.get("evidence_quote")
+        if _flat and not _is_placeholder(_flat):
+            evidence_quote = str(_flat).strip()
+    elif _is_placeholder(evidence_quote):
+        evidence_quote = "NOT_FOUND"
 
     # evidence_location: prefer finding-level source which is set correctly by
     # bg_worker (Excel scoping gate). ev_item["source"] contains LLM hallucinations
@@ -476,7 +540,18 @@ def map_new_schema_to_legacy(finding):
             parts.append(f"Business Impact: {biz_impact}")
         if missing_reqs:
             parts.append(f"Missing Requirements: {', '.join(missing_reqs)}")
-        gap_desc = " | ".join(parts) if parts else "No documented evidence satisfying the control requirements."
+        if parts:
+            gap_desc = " | ".join(parts)
+        elif str(status_val).strip().upper() in ("COMPLIANT", "FALSE_POSITIVE"):
+            # "No gaps reported" is the normal state for a COMPLIANT finding, not an
+            # absence of evidence. This fallback used to emit "No documented evidence
+            # satisfying the control requirements." unconditionally, so a verified
+            # COMPLIANT finding was published with a description flatly contradicting
+            # its own verdict -- confirmed on a live run, where controls quoting
+            # "NTP enabled: yes" and "Document Version: 1.0" both carried that line.
+            gap_desc = "No gaps identified. The cited evidence satisfies the control requirement."
+        else:
+            gap_desc = "No documented evidence satisfying the control requirements."
     mapped["gap_description"] = gap_desc
     mapped["finding"] = gap_desc
     mapped["description"] = gap_desc
@@ -565,12 +640,24 @@ def check_reasoning_hallucination(reasoning, document_text, threshold=0.4):
     sentences = re.split(r'(?<=[.!?])\s+', reasoning.strip())
     flagged = []
 
-    # Phrases that are suspicious if not found in document
-    GENERIC_SAFE_PHRASES = [
-        "iso 27001", "control", "compliance", "evidence", "document",
-        "policy", "procedure", "requirement", "not found", "not evidenced",
-        "does not contain", "no evidence", "gap", "missing", "incident",
-        "security", "organization", "auditor", "finding"
+    # Sentences that assert an ABSENCE are exempt: you cannot ground "X is not
+    # present" by finding X in the document, so demanding a document match for
+    # those would flag every correct NON_COMPLIANT finding.
+    #
+    # This list previously also held generic audit nouns -- "control",
+    # "compliance", "evidence", "document", "policy", "procedure",
+    # "requirement", "security", "organization", "auditor", "finding". Because
+    # the check below skips a sentence when ANY entry matches, and essentially
+    # every sentence of audit reasoning contains at least one of those words,
+    # the detector skipped essentially everything and could not return a
+    # negative result on realistic input. Confirmed by execution: reasoning
+    # containing two wholly fabricated factual claims returned clean=True with
+    # zero flagged phrases. Only genuine absence markers belong here.
+    ABSENCE_CLAIM_PHRASES = [
+        "not found", "not evidenced", "not provided", "not documented",
+        "does not contain", "does not include", "does not specify",
+        "no evidence", "no documented", "could not be found",
+        "was not located", "absent from",
     ]
 
     for sentence in sentences:
@@ -586,9 +673,9 @@ def check_reasoning_hallucination(reasoning, document_text, threshold=0.4):
         has_claim = any(v in s for v in claim_verbs)
         if not has_claim:
             continue
-        # If it makes a factual claim, check that at least one key phrase from the sentence appears in the document
-        is_safe = any(phrase in s for phrase in GENERIC_SAFE_PHRASES)
-        if is_safe:
+        # Absence claims are exempt (see ABSENCE_CLAIM_PHRASES above); positive
+        # factual claims must be traceable to the document.
+        if any(phrase in s for phrase in ABSENCE_CLAIM_PHRASES):
             continue
         # Extract 3-word windows and check in document
         found_in_doc = False
@@ -705,6 +792,20 @@ def evaluate_nist_risk_and_severity(finding, control_id=None):
     If risk cannot be reliably determined: sets likelihood=N/A, impact=N/A, risk_level=UNDETERMINED, severity=N/A.
     """
     status_upper = str(finding.get("status") or "").upper()
+    # NOT_EVALUATED means the control never reached an assessment (engine timeout).
+    # Scoring risk from a non-evaluation would manufacture a severity for a finding
+    # that has no result, so it exits here alongside COMPLIANT -- but with its own
+    # rationale, because "no risk action required" would be a false reassurance.
+    if status_upper == "NOT_EVALUATED" or finding.get("final_result") == "NOT_EVALUATED":
+        finding["severity"] = "N/A"
+        finding["risk_level"] = "UNDETERMINED"
+        finding["likelihood"] = "N/A"
+        finding["impact"] = "N/A"
+        finding["risk_rationale"] = (
+            "NOT EVALUATED: The analysis engine did not return a result for this control, "
+            "so no risk determination can be made. Re-run this control."
+        )
+        return finding
     if status_upper in ("COMPLIANT", "FALSE_POSITIVE") or finding.get("final_result") == "COMPLIANT":
         finding["severity"] = "N/A"
         finding["risk_level"] = "N/A"
@@ -1032,6 +1133,10 @@ def validate_only(finding, document_text, expected_evidence_map, db_chunks=None)
         if evidence_clean != "NOT_FOUND" else []
     )
     grounded_items = []
+    # Counts excerpts that only verified via the longest-prefix fallback -- i.e. the
+    # tail of the quote was NOT found in the source. Surfaced for human review below,
+    # because the model's verdict was formed on text that includes that unverified tail.
+    prefix_only_items = 0
 
     for item_text in candidate_items:
         norm_item = normalize_text(item_text)
@@ -1099,20 +1204,31 @@ def validate_only(finding, document_text, expected_evidence_map, db_chunks=None)
                     item_final_text = expand_to_complete_sentence(item_text, document_text)
                     print(f"[VALIDATOR] Grounding matched via alphanumeric fallback for control {control_id}", flush=True)
                 else:
-                    # Look for the longest prefix of THIS item (word by word) that exists in the document
+                    # Look for the longest prefix of THIS item (word by word) that exists
+                    # in the document.
+                    #
+                    # The floor used to be 6 words (`range(len(words), 5, -1)`), which is
+                    # no evidential bar at all: "The organization shall implement access
+                    # control" is six generic words present in almost any policy document,
+                    # and matching them marked a quote of ANY length GROUNDED -- the
+                    # remaining words could be entirely fabricated. Require a substantial
+                    # share of the quote instead, and never fewer than 12 words.
                     words = item_text.split()
-                    for i in range(len(words), 5, -1):  # Check down to minimum of 6 words
+                    min_prefix_words = max(12, (len(words) + 1) // 2)
+                    for i in range(len(words), min_prefix_words - 1, -1):
                         prefix = " ".join(words[:i])
                         norm_prefix = normalize_text(prefix)
                         if norm_prefix in norm_doc:
                             item_final_text = expand_to_complete_sentence(prefix, document_text)
                             item_grounded = True
+                            prefix_only_items += 1
                             print(f"[VALIDATOR] Longest matching quote prefix expanded to complete sentence: '{item_final_text}'", flush=True)
                             break
                         alpha_prefix = clean_alphanumeric(prefix)
                         if alpha_prefix and alpha_prefix in alpha_doc:
                             item_final_text = expand_to_complete_sentence(prefix, document_text)
                             item_grounded = True
+                            prefix_only_items += 1
                             print(f"[VALIDATOR] Longest matching quote prefix expanded (alphanumeric): '{item_final_text}'", flush=True)
                             break
 
@@ -1262,16 +1378,44 @@ def validate_only(finding, document_text, expected_evidence_map, db_chunks=None)
                 if not is_image_chunk:
                     continue  # Gate 3.5 applies only to image/OCR chunks
 
-                chunk_text_lower = chunk.content.lower()
-                matched_terms = sum(1 for t in quote_key_terms if t in chunk_text_lower)
-                overlap = matched_terms / len(quote_key_terms)
+                # Terms must co-occur inside a bounded WINDOW of the chunk, matched
+                # on word boundaries -- not scattered anywhere in it as substrings.
+                #
+                # This previously did `sum(1 for t in quote_key_terms if t in
+                # chunk_text_lower)`: order-free, distance-free, and a bare substring
+                # test, so "com" matched inside "commit" and "ntp" inside "ntpd", and
+                # terms drawn from opposite ends of a long OCR dump counted as a
+                # match. Confirmed by execution: the quote "NTP enabled synchronized
+                # configuration status" -- which appears nowhere in the source as a
+                # phrase -- scored 80% and was rated GROUNDED, and a quote whose
+                # conclusion inverted the source scored 100%. Since most controls here
+                # are screenshot-scoped, this is the gate most evidence passes through.
+                #
+                # The window keeps genuine OCR tolerance (terms may be reordered or
+                # interrupted by OCR noise within a local region) while rejecting
+                # document-wide scavenging.
+                chunk_words = _re_g35.findall(r'\b[a-z0-9]+\b', chunk.content.lower())
+                if not chunk_words:
+                    continue
+                window_size = max(len(quote_key_terms) * 3, 25)
+                unique_terms = set(quote_key_terms)
+                best_matched = 0
+                for w_start in range(0, max(1, len(chunk_words) - window_size + 1)):
+                    window_set = set(chunk_words[w_start : w_start + window_size])
+                    hits = len(unique_terms & window_set)
+                    if hits > best_matched:
+                        best_matched = hits
+                        if best_matched == len(unique_terms):
+                            break
+                matched_terms = best_matched
+                overlap = matched_terms / len(unique_terms)
                 if overlap >= 0.60:
                     grounded_state = "GROUNDED_WITH_OCR_WARNING"
                     matched_chunk_id = chunk.id
                     print(
                         f"[VALIDATOR] Gate 3.5 (Image Key-Term) PASS for {control_id}: "
-                        f"{matched_terms}/{len(quote_key_terms)} terms ({overlap:.0%}) "
-                        f"in '{chunk.filename}'",
+                        f"{matched_terms}/{len(unique_terms)} terms ({overlap:.0%}) "
+                        f"co-occurring within a {window_size}-word window of '{chunk.filename}'",
                         flush=True
                     )
                     if chunk.metadata_json:
@@ -1730,6 +1874,42 @@ def derive_policy_required(req_text: str, control_id: str = "", control_name: st
     return False
 
 
+def policy_required_reason(req_text: str, control_id: str = "", control_name: str = "") -> str:
+    """Why derive_policy_required() answered as it did: 'keyword', 'clause_fallback', or 'none'.
+
+    The two True paths carry very different weight. A requirement that literally asks
+    for a policy or procedure is explicit evidence of intent. The clause 5/6/7 branch
+    is a blanket default applied to every Organizational, People and Physical control
+    whose text happens not to mention one -- a reasonable prior, but only a prior.
+
+    Callers that hold stronger evidence of the auditor's intent (an Excel checklist
+    that scoped the control to specific files) need to tell the two apart, so they can
+    override the prior without also overriding an explicit demand.
+    """
+    txt = (str(req_text or "") + " " + str(control_name or "")).lower()
+    policy_phrases = (
+        "policy", "policies", "procedure", "procedures", "documented procedure", "written standard",
+        "governance framework", "documented strategy", "shall document", "shall define",
+        "approved policy", "documented rules", "formal procedure"
+    )
+    if any(phrase in txt for phrase in policy_phrases):
+        return "keyword"
+
+    implementation_phrases = (
+        "shall configure", "shall implement", "shall synchronize", "shall monitor",
+        "system log", "access log", "metric", "status output", "configuration setting",
+        "time server", "audit trail"
+    )
+    if any(phrase in txt for phrase in implementation_phrases):
+        return "none"
+
+    clause_match = re.match(r'^\s*(\d+)\.', str(control_id or ""))
+    if clause_match and clause_match.group(1) in ("5", "6", "7"):
+        return "clause_fallback"
+
+    return "none"
+
+
 def post_process(finding, document_text, expected_evidence_map=None, db_chunks=None):
     """
     Applies post-processing policies to a single finding.
@@ -1972,17 +2152,215 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             "mfa disabled", "sshd: disabled", "telnet: enabled", "http: enabled"
         )
 
+        # The subset of the list above whose meaning DEPENDS on what the control asks
+        # for. "disabled" disproves a control that expects something enabled, and
+        # confirms one that expects it disabled. The remaining entries (failed,
+        # denied, expired, error...) indicate a problem either way and are never
+        # suppressed.
+        _STATE_OFF_NEG = (
+            "disabled", "inactive", "not configured", "not synchronized",
+            "synchronized: no", "enabled: no", "active: no",
+            "mfa: disabled", "mfa disabled", "sshd: disabled",
+        )
+
+        # Unambiguous "this control is OFF" statements. Narrower than the list above
+        # on purpose: this set is applied to the SOURCE document, where common words
+        # like "error" or "missing" appear innocuously all the time, and a false hit
+        # would wrongly sink a genuinely compliant finding.
+        SOURCE_CONTRADICTION_INDICATORS = (
+            "enabled: no", "synchronized: no", "active: no", "status: disabled",
+            "inactive (dead)", "not synchronized", "not configured",
+            "mfa: disabled", "mfa disabled", "sshd: disabled",
+            "disabled", "inactive",
+        )
+
+        def _negation_hits(text, indicators):
+            """Negation matching with word boundaries for single words.
+
+            A bare `neg in text` test matches inside unrelated longer words --
+            the same class of bug `_kw()` documents elsewhere in this file
+            ("error" inside "errors"/"terror", "inactive" inside "inactivex").
+            Multi-word and punctuated phrases are inherently safe, so those keep
+            plain substring matching.
+            """
+            if not text:
+                return []
+            low = text.lower()
+            hits = []
+            for neg in indicators:
+                if " " in neg or ":" in neg:
+                    if neg in low:
+                        hits.append(neg)
+                elif _kw(neg, low):
+                    hits.append(neg)
+            return hits
+
+        # ── SOURCE-SIDE CONTRADICTION CHECK ────────────────────────────────
+        # The negative-proof scan below reads each evidence item's extracted_text --
+        # which is the MODEL'S OWN QUOTE, not the document it came from. A model
+        # that quotes selectively simply omits the disqualifying words and the
+        # scan sees a clean string. Confirmed by execution: source reading
+        # "NTP enabled: no / synchronized: no / chronyd.service: inactive (dead)"
+        # produced a full-pipeline verdict of COMPLIANT, because the model quoted
+        # "NTP enabled synchronized chronyd service time zone" and dropped every
+        # negation. The guard was inspecting the suspect's statement instead of
+        # the source record.
+        #
+        # Scan the actual grounded source text as well. Restricted to the chunk(s)
+        # this finding was grounded against -- never the whole session document --
+        # so an unrelated file mentioning "disabled" cannot poison other controls.
+        source_scan_text = ""
+        try:
+            if db_chunks:
+                _fid = finding.get("chunk_id")
+                _srcs = {
+                    s.strip().lower()
+                    for s in str(finding.get("source_files") or "").split(",")
+                    if s.strip()
+                }
+                _matched = [c for c in db_chunks if _fid is not None and getattr(c, "id", None) == _fid]
+                if not _matched and _srcs:
+                    _matched = [
+                        c for c in db_chunks
+                        if str(getattr(c, "filename", "") or "").strip().lower() in _srcs
+                    ]
+                source_scan_text = " ".join(
+                    str(getattr(c, "content", "") or "") for c in _matched
+                )
+        except Exception as e:
+            print(f"[VALIDATOR] Source contradiction scan skipped: {e}", flush=True)
+            source_scan_text = ""
+
+        # Control key terms, used to require that a negation actually refers to THIS
+        # control. Without this a chunk reading "NTP enabled: yes ... IPv6: disabled"
+        # would sink a correct COMPLIANT finding about NTP on the strength of an
+        # unrelated line -- trading the false pass for a false failure, which is just
+        # as wrong for an audit.
+        _CTRL_STOP = {
+            "the", "and", "for", "with", "whether", "that", "this", "are", "was",
+            "has", "have", "been", "any", "all", "its", "from", "into", "not",
+            "is", "of", "in", "on", "to", "a", "an", "or", "by", "as", "at",
+        }
+        _ctrl_term_src = " ".join(str(x or "") for x in (
+            finding.get("question"), finding.get("control_name"), finding.get("control_id")
+        )).lower()
+        control_key_terms = {
+            w for w in re.findall(r'\b[a-z0-9]{3,}\b', _ctrl_term_src) if w not in _CTRL_STOP
+        }
+
+        # A control that legitimately expects something to be OFF (e.g. "whether Telnet
+        # is disabled") is CONFIRMED, not contradicted, by the word "disabled" in its
+        # source. Detecting that keeps the check from inverting such controls.
+        _OFF_EXPECTED = (
+            "disabled", "disable", "removed", "blocked", "prohibited", "restricted",
+            "not permitted", "turned off", "deactivated", "denied", "revoked",
+        )
+        control_expects_off = any(p in _ctrl_term_src for p in _OFF_EXPECTED)
+
+        def _proximate_negations(text, indicators, window=8):
+            """Negations sitting near a term that belongs to THIS control.
+
+            Proximity is required on BOTH the quote and the source, because each
+            routinely carries unrelated neighbouring lines.
+            expand_to_complete_sentence() widens a verified quote by up to ~450
+            characters, and terminal screenshots carry no sentence punctuation, so a
+            correct "NTP enabled: yes" citation reliably drags in an adjacent
+            "IPv6 forwarding: disabled". Scanning that flat -- as this check did --
+            marked the requirement NOT_SUPPORTED and sank a genuinely compliant
+            finding: a false failure, which is no better for an audit than a false pass.
+            """
+            if not text or not indicators or not control_key_terms:
+                return []
+            low = text.lower()
+            hits = []
+            for neg in indicators:
+                start = low.find(neg)
+                while start != -1:
+                    before = re.findall(r'\b[a-z0-9]+\b', low[:start])[-window:]
+                    after = re.findall(
+                        r'\b[a-z0-9]+\b', low[start + len(neg): start + len(neg) + 60]
+                    )
+                    if (set(before) | set(after)) & control_key_terms:
+                        hits.append(neg)
+                        break
+                    start = low.find(neg, start + 1)
+            return hits
+
+        # Polarity filter applied at the call site so both sides share one rule: a
+        # control that expects something OFF is confirmed, not contradicted, by the
+        # off-state words.
+        _src_indicators = tuple(
+            n for n in SOURCE_CONTRADICTION_INDICATORS
+            if not (control_expects_off and n in _STATE_OFF_NEG)
+        )
+        source_contradictions = _proximate_negations(source_scan_text, _src_indicators)
+
+        # True when the auditor's Excel checklist locked this control to specific
+        # file(s). Set by audit_graph.validate_node from the graph state; absent for
+        # standard (non-scoped) runs, which keep the clause default untouched.
+        excel_scoped = bool(
+            finding.get("locked_filenames")
+            or finding.get("evidence_locked_filenames")
+            or finding.get("policy_locked_filenames")
+        )
+
         for idx, req_text in enumerate(raw_reqs):
             req_id = f"R{idx+1}"
             policy_req = derive_policy_required(req_text, control_id, finding.get("control_name") or "")
+
+            # Excel scoping is a stronger statement of intent than the clause default.
+            #
+            # derive_policy_required() defaults every 5.x/6.x/7.x control to
+            # "needs a documented policy" when its text doesn't say otherwise. When the
+            # auditor's own checklist has locked this control to specific file(s), they
+            # have already declared what is in scope for it -- and if they scoped only an
+            # operational artifact, failing the control for a missing policy artifact they
+            # never put in scope is the tool overruling the auditor.
+            #
+            # Confirmed on a live run: 5.33 "Whether log archival is done?" was locked to
+            # a single screenshot. Clause-5 fallback demanded a policy, none existed in a
+            # JPG, and the requirement was marked NOT_SUPPORTED before the model's
+            # assessment counted for anything -- unpassable regardless of the evidence.
+            #
+            # Only the blanket clause default is overridden. A requirement that explicitly
+            # asks for a policy or procedure still requires one, scoped or not.
+            if policy_req and excel_scoped and not policy_items:
+                if policy_required_reason(req_text, control_id, finding.get("control_name") or "") == "clause_fallback":
+                    policy_req = False
+                    finding["policy_requirement_waived"] = True
+                    print(
+                        f"[VALIDATOR] Policy requirement waived for {control_id} ({req_id}): "
+                        f"clause-{str(control_id).split('.')[0]} default overridden because the Excel "
+                        f"checklist scoped this control to evidence only.",
+                        flush=True
+                    )
             matching_items = [it for it in evidence_items if not it.restated_policy and it.grounding_status in ("GROUNDED", "GROUNDED_WITH_OCR_WARNING", "VERIFIED", "")]
             
+            # Polarity matters on the quote side too. "disabled"/"inactive" prove
+            # non-compliance only when the control expects the thing to be ON. For a
+            # control that expects it OFF ("whether Telnet is disabled"), the correct
+            # evidence necessarily contains the word "disabled" -- and the flat list
+            # below marked exactly that evidence NOT_SUPPORTED, so such a control could
+            # never pass no matter what was uploaded. Words that are bad regardless of
+            # polarity (failed, denied, expired) still apply either way.
+            quote_indicators = tuple(
+                neg for neg in NEGATIVE_PROOF_INDICATORS
+                if not (control_expects_off and neg in _STATE_OFF_NEG)
+            )
+
             has_negative_proof = False
+            negative_from_source = False
             for it in matching_items:
-                txt_lower = (it.extracted_text or "").lower()
-                if any(neg in txt_lower for neg in NEGATIVE_PROOF_INDICATORS):
+                if _proximate_negations(it.extracted_text, quote_indicators):
                     has_negative_proof = True
                     break
+
+            # The source itself says the control is off, even if the model's quote
+            # carefully avoided saying so. This is the check that closes the
+            # false-COMPLIANT path; it fires regardless of what the quote contains.
+            if source_contradictions and matching_items:
+                has_negative_proof = True
+                negative_from_source = True
 
             if conflict_detected:
                 r_status = "NOT_SUPPORTED"
@@ -1994,7 +2372,35 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
                 r_op_source = None
             elif has_negative_proof:
                 r_status = "NOT_SUPPORTED"
-                r_reason = "Retrieved grounded evidence indicates non-compliance or a disabled/failed security control state."
+                if negative_from_source:
+                    r_reason = (
+                        "Source document contradicts the cited evidence: the grounded source text "
+                        f"states {', '.join(repr(h) for h in source_contradictions[:3])}, "
+                        "indicating the control is not in effect."
+                    )
+                    finding["contradiction_suspected"] = True
+                    finding["contradiction_terms"] = source_contradictions[:5]
+                    # requires_human_review also routes this back through the reflection
+                    # pass in audit_graph.py (should_continue -> "reflect"), which
+                    # previously never saw a confidently-wrong-but-grounded finding
+                    # because nothing marked one as failed.
+                    finding["requires_human_review"] = True
+                    finding["requires_review"] = True
+                    _cd_note = (
+                        "Contradiction: the source document states "
+                        f"{', '.join(repr(h) for h in source_contradictions[:3])}, which is "
+                        "inconsistent with the assessment drawn from it. Verify against the original artifact."
+                    )
+                    _existing_cd = finding.get("review_note") or ""
+                    if "Contradiction:" not in _existing_cd:
+                        finding["review_note"] = f"{_existing_cd} | {_cd_note}".strip(" |")
+                    print(
+                        f"[VALIDATOR] SOURCE CONTRADICTION for {finding.get('control_id')}: "
+                        f"{source_contradictions[:3]} present in grounded source -- forcing NOT_SUPPORTED.",
+                        flush=True
+                    )
+                else:
+                    r_reason = "Retrieved grounded evidence indicates non-compliance or a disabled/failed security control state."
                 r_op_source = matching_items[0].source_file if matching_items else None
                 evidence_assessment = "NON_COMPLIANT"
             elif matching_items and raw_ev_assess != "NON_COMPLIANT":

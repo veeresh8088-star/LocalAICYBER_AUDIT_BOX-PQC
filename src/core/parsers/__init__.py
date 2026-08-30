@@ -11,6 +11,7 @@ from .nmap_parser import NmapParser
 from .burp_parser import BurpParser
 from .qualys_parser import QualysParser
 from .trivy_parser import TrivyParser
+from .kali_parser import KaliParser
 from .pqc_parser import PQCParser, pqc_extract_text, _PQC_BINARY_EXTENSIONS
 
 ALL_PARSERS = [
@@ -19,6 +20,11 @@ ALL_PARSERS = [
     BurpParser(),
     QualysParser(),
     TrivyParser(),
+    # Kali console tools (nikto, sqlmap, gobuster, hydra, wpscan). Sits after the
+    # structured-export parsers and before PQCParser: its signatures are specific
+    # tool banners, so it will not steal a Nessus/Burp/Trivy export, but it must
+    # get its chance before PQC's weak 2-keyword check claims the file.
+    KaliParser(),
     # PQCParser goes LAST -- its can_parse() is a weak-signal (2+ keyword) check
     # like Nessus's own fallback path, so it must never steal a file that a more
     # specific structural-signature parser above would have claimed.
@@ -68,8 +74,11 @@ def parse_tool_file(filename: str, content: str, framework: str = "") -> Tuple[L
     # mention "TLS 1.0" or "RSA" in their OCR text.
     ext_lower = __import__('os').path.splitext(filename.lower())[1]
     if ext_lower in _PQC_BINARY_EXTENSIONS and not _is_vapt_framework:
-        pqc_p = ALL_PARSERS[-1]  # PQCParser is always last
-        if pqc_p.can_parse(filename, content):
+        # Looked up by type rather than by position. `ALL_PARSERS[-1]` relied on
+        # PQCParser staying last in the list; appending any parser would have
+        # silently handed this fast-path to the wrong one, with no error.
+        pqc_p = next((p for p in ALL_PARSERS if isinstance(p, PQCParser)), None)
+        if pqc_p is not None and pqc_p.can_parse(filename, content):
             res = pqc_p.parse(filename, content)
             findings, extra = res if isinstance(res, tuple) else (res, None)
             if findings:
@@ -88,7 +97,25 @@ def parse_tool_file(filename: str, content: str, framework: str = "") -> Tuple[L
         return [], None
 
     # ── Stage 3: Content-signature parser dispatch (text-based files) ────────
-    for p in ALL_PARSERS:
+    #
+    # The VAPT guard has to hold here too, not only on the binary fast-path above.
+    # That earlier guard only covers _PQC_BINARY_EXTENSIONS, so a plain-text
+    # scanner export skipped it entirely and fell into this loop, where PQCParser
+    # sits last and claims anything mentioning cryptography. Confirmed on a real
+    # file: VAPT/nessus_vulnerability_report.txt, which literally opens with
+    # "Tenable Nessus Scan Report", was rejected by NessusParser.can_parse() and
+    # claimed by PQCParser -- its HSTS and TLS vulnerabilities were replaced by
+    # three duplicate "CBC-mode weak algorithm" PQC findings, and the Stage 3
+    # NessusParser fallback below was never reached because the file had already
+    # been claimed.
+    #
+    # Dropping PQCParser from the candidate list under the VAPT framework lets an
+    # unclaimed scanner export reach that fallback, which is what it is for.
+    _parsers = [
+        p for p in ALL_PARSERS
+        if not (_is_vapt_framework and p.__class__.__name__ == "PQCParser")
+    ]
+    for p in _parsers:
         if p.can_parse(filename, content):
             res = p.parse(filename, content)
             findings, extra = res if isinstance(res, tuple) else (res, None)
@@ -121,6 +148,6 @@ def parse_tool_file(filename: str, content: str, framework: str = "") -> Tuple[L
 
 __all__ = [
     "Finding", "BaseParser", "is_image_file", "map_finding_to_control", "map_findings_list",
-    "NessusParser", "NmapParser", "BurpParser", "QualysParser", "TrivyParser", "PQCParser",
+    "NessusParser", "NmapParser", "BurpParser", "QualysParser", "TrivyParser", "KaliParser", "PQCParser",
     "parse_tool_file", "pqc_extract_text",
 ]

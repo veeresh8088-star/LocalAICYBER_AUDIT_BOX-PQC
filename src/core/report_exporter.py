@@ -2166,7 +2166,7 @@ def _export_pqc_docx(session_title, findings, resolved_list, status, comments=""
         _table_row(cbom_tbl, [
             f.get("asset_category") or "-",
             f.get("asset_name") or f.get("target") or "-",
-            (f.get("title") or "").replace("Quantum-Vulnerable Algorithm Detected: ", "").replace("Classically Weak / Deprecated Algorithm Detected: ", "").replace("Quantum-Safe Algorithm Confirmed: ", ""),
+            (f.get("title") or "").replace("Quantum-Vulnerable Algorithm Detected: ", "").replace("Classically Weak / Deprecated Algorithm Detected: ", "").replace("Quantum-Safe Algorithm Confirmed: ", "").replace("PQC Readiness Gap: ", ""),
             f.get("quantum_status") or "-",
             f.get("protocol_version") or f.get("ca_algorithm") or f.get("key_algorithm") or "-",
             f.get("severity") or "-",

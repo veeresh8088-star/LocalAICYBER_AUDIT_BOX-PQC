@@ -31,6 +31,72 @@ _RISK_KEYWORDS = [
     (re.compile(r'default (?:credentials|password)', re.IGNORECASE), "HIGH", "Default Credentials in Use"),
 ]
 
+def _clean_nmap_title(raw: str) -> str:
+    """Tidy a title lifted out of raw nmap output.
+
+    The NSE/CVE regex captures from the CVE token to end of line, so a real
+    ssl-enum-ciphers line --
+
+        TLS_RSA_WITH_AES_128_CBC_SHA (dh 2048) - Vulnerable to LUCKY13 (CVE-2013-0169)
+
+    -- yielded the title "Vuln Finding: CVE-2013-0169)", complete with the orphan
+    bracket the capture started inside. That string goes straight into the
+    customer's report.
+    """
+    t = re.sub(r'\s+', ' ', str(raw or '')).strip()
+    t = t.lstrip('|_ ').strip()
+    # Drop a closing bracket whose opener the capture never included.
+    if t.count(")") > t.count("("):
+        t = t.replace(")", "", t.count(")") - t.count("("))
+    if t.count("]") > t.count("["):
+        t = t.replace("]", "", t.count("]") - t.count("["))
+    t = re.sub(r'[\s\-–,;:]+$', '', t)
+    return t.strip()
+
+
+def _severity_for_cve_line(line: str, cves: List[str]) -> str:
+    """Severity for a CVE mention that carries no stated rating.
+
+    Every CVE hit used to be flat "HIGH". Nmap does not publish a severity, so
+    that was an assumption, and it collided head-on with the other scanner: the
+    same CVE-2013-0169 was HIGH here and Low (CVSS 2.3) in the Nessus report from
+    the same engagement. Two severities for one vulnerability in one report pack
+    is the first thing an auditor challenges.
+
+    Without an offline CVE database an exact CVSS cannot be derived, so this reads
+    what the line itself says and otherwise settles on MEDIUM -- an honest
+    "unrated finding, needs triage" rather than an invented HIGH.
+    """
+    low = (line or "").lower()
+    # Explicit severity statements are checked BEFORE the keyword heuristics: a line
+    # that says "Low severity" is telling us the answer directly, and letting the
+    # CRITICAL keyword list pre-empt it means one incidental word overrides the
+    # scanner's own rating.
+    if any(k in low for k in ("low severity", "severity: low", "informational")):
+        return "LOW"
+    if any(k in low for k in ("high severity", "severity: high")):
+        return "HIGH"
+    # "unauthenticated" alone is not a finding -- Nmap script output says it in
+    # both directions ("unauthenticated access is DISABLED" is a PASS). Require it
+    # to be paired with a word that indicates the access is actually available,
+    # and treat an explicit negation as disqualifying.
+    _unauth_bad = (
+        re.search(r'unauthenticated[^.]{0,40}\b(allowed|permitted|enabled|possible|successful|access granted)\b', low)
+        and not re.search(r'\b(disabled|denied|blocked|not allowed|prevented|rejected)\b', low)
+    )
+    if any(k in low for k in ("critical", "remote code execution")) or re.search(r'(?<![a-z])rce(?![a-z])', low) or _unauth_bad:
+        return "CRITICAL"
+    # Known weak-crypto / padding-oracle classes are consistently rated low-to-
+    # medium by scanners; naming them HIGH is what caused the clash above.
+    # Word-anchored: "cbc" as a bare substring matches inside hex certificate
+    # fingerprints ("9acbcb2e..."), which appear throughout ssl-cert script output
+    # and would silently promote unrelated lines from LOW to MEDIUM.
+    if any(re.search(r'(?<![a-z0-9])' + k + r'(?![a-z0-9])', low)
+           for k in ("lucky13", "sweet32", "beast", "poodle", "cbc", "cipher")):
+        return "MEDIUM"
+    return "MEDIUM" if cves else "LOW"
+
+
 class NmapParser(BaseParser):
     def can_parse(self, filename: str, content: str) -> bool:
         """Content-signature based detection — 0% filename keyword dependency.
@@ -265,12 +331,23 @@ class NmapParser(BaseParser):
                 return
             seen_evidence.add(ev_key)
             findings.append(Finding(
-                title=f"Nmap: {title}" + (f" ({port_label})" if port_label else ""),
+                title=f"Nmap: {_clean_nmap_title(title)}" + (f" ({port_label})" if port_label else ""),
                 severity=severity,
                 cve_list=cves,
                 target=target_ip,
+                # The matched line goes INTO the description, not just the evidence
+                # field. map_finding_to_owasp() classifies on title + description, and
+                # the old boilerplate ("Nmap NSE script detection on target ...")
+                # contained no vulnerability signal at all -- so every nmap finding
+                # fell through to the A05 default. Confirmed on a real scan: nmap's
+                # CVE-2013-0169 (Lucky13, a TLS CBC weakness) was categorised
+                # A05 Security Misconfiguration, while the SAME CVE parsed from the
+                # Nessus report in the same pack came out A02 Cryptographic Failures.
+                # One CVE, two categories, one report -- straight into an auditor's
+                # first question. The source line carries the "TLS"/"cipher" words
+                # that classify it correctly.
                 description=f"Nmap NSE script detection on target {target_ip}"
-                            f"{(' port ' + port_label) if port_label else ''}.",
+                            f"{(' port ' + port_label) if port_label else ''}: {ev_key}",
                 remediation="Investigate service misconfiguration and apply vendor patches/hardening.",
                 evidence=ev_key,
                 source_tool="Nmap"
@@ -283,12 +360,38 @@ class NmapParser(BaseParser):
             block = content[block_start:block_end]
 
             # 1. Explicit NSE "-vuln" scripts / CVE mentions
-            nse_hits = re.findall(r'(?:\|_?)?([a-zA-Z0-9_-]+-vuln[^\n]*|\bCVE-\d{4}-\d+\b[^\n]*)', block, re.IGNORECASE)
+            # Iterate LINES, not regex captures.
+            #
+            # The old pattern captured from the CVE token to end-of-line, so the
+            # cipher name preceding it was discarded:
+            #
+            #   TLS_RSA_WITH_AES_128_CBC_SHA (dh 2048) - Vulnerable to LUCKY13 (CVE-2013-0169)
+            #                                                                    ^ capture began here
+            #
+            # That cost the finding its identity (a title reading "CVE-2013-0169)")
+            # and every word a classifier could use -- no "TLS", no "CBC", no
+            # "cipher" -- so it fell to the A05 default while the same CVE from the
+            # Nessus report in the same engagement was correctly A02 Cryptographic
+            # Failures. Keeping the whole line repairs the title, the severity
+            # heuristic and the OWASP category in one move.
+            nse_hits = [
+                ln.strip() for ln in block.splitlines()
+                if re.search(r'\bCVE-\d{4}-\d{4,7}\b', ln, re.IGNORECASE)
+                or re.search(r'[a-zA-Z0-9_-]+-vuln', ln, re.IGNORECASE)
+            ]
             for hit in nse_hits:
                 if hit and len(hit.strip()) > 3:
                     cves = re.findall(r'CVE-\d{4}-\d{4,7}', hit, re.IGNORECASE)
                     if cves:
-                        _add_finding(f"Vuln Finding: {hit[:60]}", "HIGH" if cves else "MEDIUM", cves, hit, port_label)
+                        # Title from the WHOLE source line, not from the CVE token
+                        # onward -- the capture starts mid-bracket and produced
+                        # "Vuln Finding: CVE-2013-0169)".
+                        _line = hit.strip().lstrip('|_ ').strip()
+                        _add_finding(
+                            f"Vuln Finding: {_line[:90]}",
+                            _severity_for_cve_line(_line, cves),
+                            cves, hit, port_label,
+                        )
 
             # 2. Keyword-based misconfiguration detection across NSE script lines in the block
             for line in block.splitlines():

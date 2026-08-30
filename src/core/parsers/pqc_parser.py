@@ -32,7 +32,7 @@ import io
 import json
 import os
 import re
-from typing import List, Tuple, Any, Callable, Optional, Union
+from typing import List, Tuple, Any, Callable, Dict, Optional, Union
 
 from .base_parser import BaseParser, is_image_file
 from .finding_schema import Finding
@@ -320,8 +320,35 @@ def pqc_extract_text(filename: str, raw_bytes: bytes) -> str:
     return ""
 
 
+# Keywords whose intent is a prefix match ("cryptograph" must still catch
+# "cryptography" and "cryptographic"), so they get a leading boundary only.
+_PQC_PREFIX_KEYWORDS = frozenset({"cryptograph", "encrypt", "encrypted"})
+
+
 def _count_pqc_signals(sample_lower: str) -> int:
-    return sum(1 for kw in _PQC_KEYWORDS if kw in sample_lower)
+    """Counts PQC-relevant keyword hits, matched on word boundaries.
+
+    Plain substring matching (`kw in sample_lower`) made several of these
+    three-letter entries fire on ordinary prose: "sha" matched "shall" and
+    "shared", "rsa" matched "universal" and "reversal", "aes" matched "Caesar".
+    Since can_parse() claims a file at only two hits, and the remaining keywords
+    are generic ("encryption", "algorithm", "certificate"), any ISO policy
+    document containing the word "shall" was one common noun away from being
+    routed to the PQC parser.
+    """
+    if not sample_lower:
+        return 0
+    hits = 0
+    for kw in _PQC_KEYWORDS:
+        esc = re.escape(kw)
+        pattern = (
+            r'(?<![a-z0-9])' + esc
+            if kw in _PQC_PREFIX_KEYWORDS
+            else r'(?<![a-z0-9])' + esc + r'(?![a-z0-9])'
+        )
+        if re.search(pattern, sample_lower):
+            hits += 1
+    return hits
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -338,6 +365,31 @@ def _count_pqc_signals(sample_lower: str) -> int:
 #                       dependent rules (RSA key size, DH group number).
 
 _SEV_INFO = "INFO"
+
+# Rules that detect the *presence of TLS configuration* rather than a specific
+# algorithm. Their evidence is a directive or a file path (e.g.
+# "ssl-cert = /path/to/cert"), so titling them "Quantum-Vulnerable Algorithm
+# Detected: ..." claims something the evidence does not support and reads as a
+# false positive beside a real algorithm finding. They answer "is this service
+# PQC-ready?", so they are titled as readiness gaps instead -- and suppressed
+# outright when the same document already shows a NIST PQC algorithm, because
+# the gap they assert ("TLS enabled with no post-quantum suite") is then false.
+_CONFIG_PRESENCE_RULES = frozenset({
+    "db-ssl-cert", "db-ssl-key", "db-tls13-no-pqc",
+    "springboot-ssl-enabled", "java-keystore-pkcs12",
+    "k8s-tls-secret", "k8s-ingress-tls",
+    "kafka-ssl-keystore", "kafka-ssl-keystore-type", "kafka-ssl-protocol",
+    "gnutls-no-pqc",
+})
+
+# Rule ids that identify an actual NIST-selected post-quantum algorithm.
+# Finding one of these is what suppresses _CONFIG_PRESENCE_RULES above.
+_PQC_ALGORITHM_RULES = frozenset({
+    "kyber", "dilithium", "sphincs", "falcon", "pqc-hybrid-kem",
+    # Set by the extended OID / IANA-suite / liboqs scan for a SAFE hit in a PQC
+    # category, so PQC expressed only as an OID or suite code also counts.
+    "pqc-extended-scan",
+})
 
 
 def _rsa_sized_severity(m: "re.Match") -> str:
@@ -381,7 +433,14 @@ ALGORITHM_RULES: List[Tuple[str, "re.Pattern", Union[None, str, Callable], str, 
      _rsa_sized_namer, "VULNERABLE", "Asymmetric Encryption (RSA)", _rsa_sized_severity),
     ("rsa-generic", re.compile(r'\bRSA\b(?!\s*[\d])', re.IGNORECASE),
      "RSA (unspecified key size)", "VULNERABLE", "Asymmetric Encryption (RSA)", "CRITICAL"),
-    ("dsa", re.compile(r'\bDSA\b', re.IGNORECASE),
+    # dsa: must NOT match the NIST PQC signature names that embed 'DSA' after a
+    # hyphen -- ML-DSA (FIPS 204), SLH-DSA (FIPS 205), FN-DSA (Falcon). Plain
+    # '\bDSA\b' matched all three, because '-' is a non-word character and so
+    # forms a word boundary, raising a false CRITICAL "quantum-vulnerable DSA"
+    # on exactly the algorithms a *completed* PQC migration is supposed to show.
+    # The lookbehind rejects a preceding word char or hyphen; ECDSA stays
+    # excluded by the leading \b as before.
+    ("dsa", re.compile(r'(?<![\w-])DSA\b', re.IGNORECASE),
      "DSA", "VULNERABLE", "Asymmetric Digital Signature (DSA)", "CRITICAL"),
     ("dh-group", re.compile(r'\bDH\s*Group\s*(?:1[0-8]|[1-9])\b', re.IGNORECASE),
      _dh_group_namer, "VULNERABLE", "Key Exchange (Diffie-Hellman)", _dh_group_severity),
@@ -401,6 +460,15 @@ ALGORITHM_RULES: List[Tuple[str, "re.Pattern", Union[None, str, Callable], str, 
      "Curve25519 / X25519", "VULNERABLE", "Elliptic Curve Cryptography (ECC)", "HIGH"),
     ("ecc-ed25519", re.compile(r'\bEd25519\b', re.IGNORECASE),
      "Ed25519", "VULNERABLE", "Elliptic Curve Cryptography (ECC)", "HIGH"),
+    # ecdhe: the dominant quantum-vulnerable key exchange in real TLS configs,
+    # and previously undetected entirely -- '\bDHE\b' cannot match it (preceded
+    # by 'C') and '\bECDH\b' cannot either (followed by 'E'), so every
+    # ECDHE-* cipher suite was reported with only its signature and symmetric
+    # parts flagged while the key exchange itself stayed invisible. Listed
+    # before ecdsa purely so key exchange reads before signature.
+    ("ecdhe", re.compile(r'\bECDHE\b', re.IGNORECASE),
+     "ECDHE (Elliptic Curve Diffie-Hellman Ephemeral)", "VULNERABLE",
+     "Key Exchange (Elliptic Curve)", "HIGH"),
     ("ecdsa", re.compile(r'\bECDSA\b', re.IGNORECASE),
      "ECDSA", "VULNERABLE", "Elliptic Curve Cryptography (ECC)", "HIGH"),
     ("ecdh", re.compile(r'\bECDH\b', re.IGNORECASE),
@@ -450,6 +518,21 @@ ALGORITHM_RULES: List[Tuple[str, "re.Pattern", Union[None, str, Callable], str, 
      "SHA-256 (acceptable minimum)", "SAFE", "Hash Function", _SEV_INFO),
     ("sha3", re.compile(r'\bSHA[\s\-_]?3\b', re.IGNORECASE),
      "SHA-3", "SAFE", "Hash Function", _SEV_INFO),
+    # pqc-hybrid-kem: the *fused* hybrid group names that real TLS stacks
+    # actually negotiate -- 'X25519MLKEM768' (the IETF/browser default),
+    # 'X25519Kyber768Draft00', 'SecP256r1MLKEM768', 'X448MLKEM1024'. These were
+    # invisible to the 'kyber' rule below, because '\bML[\s\-]?KEM\b' cannot
+    # match inside 'X25519MLKEM768' -- the preceding '9' is a word character, so
+    # there is no word boundary. The effect was that a server which had already
+    # deployed hybrid post-quantum key exchange got no credit for it, the exact
+    # mirror of the ML-DSA false positive. Must be listed before 'kyber' so the
+    # fused form claims the span first.
+    ("pqc-hybrid-kem", re.compile(
+        r'\b(?:X25519|X448|SecP256r1|SecP384r1|P256|P384)'
+        r'(?:[\s\-_]?(?:MLKEM|ML[\s\-]KEM|Kyber))'
+        r'[\s\-_]?\d{3,4}(?:Draft\d+)?\b',
+        re.IGNORECASE),
+     None, "SAFE", "PQC Hybrid Key Exchange (NIST-selected, hybrid mode)", _SEV_INFO),
     ("kyber", re.compile(r'\b(?:CRYSTALS[\s\-]?Kyber|ML[\s\-]?KEM)\b', re.IGNORECASE),
      "CRYSTALS-Kyber / ML-KEM", "SAFE", "PQC Key Encapsulation (NIST-selected)", _SEV_INFO),
     ("dilithium", re.compile(r'\b(?:CRYSTALS[\s\-]?Dilithium|ML[\s\-]?DSA)\b', re.IGNORECASE),
@@ -918,6 +1001,22 @@ def _find_asset_context(content: str, match_start: int, filename: str) -> str:
     if hits:
         return hits[-1].group(0).strip()
     return filename
+
+
+# Comment markers across the config formats this parser sees: nginx/apache/yaml/
+# shell use '#', ini/php use ';', json5/js/java use '//', SQL uses '--', XML uses
+# '<!--'. Only a marker at the START of the line makes the whole line a comment.
+_COMMENT_MARKERS = ("#", "//", ";", "--", "<!--", "!")
+
+
+def _is_comment_line(line: str) -> bool:
+    """True when the line is entirely commented out.
+
+    A trailing comment on a live directive ("ssl_ciphers ...;  # legacy") is NOT a
+    comment line -- the directive is still in force and must still be assessed.
+    """
+    stripped = (line or "").strip()
+    return bool(stripped) and stripped.startswith(_COMMENT_MARKERS)
 
 
 def _line_containing(content: str, start: int, end: int) -> str:
@@ -1443,8 +1542,15 @@ class PQCParser(BaseParser):
         # by extension alone -- text will be extracted inside parse().
         ext_lower = os.path.splitext(filename.lower())[1]
         if ext_lower in _PQC_BINARY_EXTENSIONS:
-            # Images with PQC-relevant names (e.g. 'nist_pqc_cert.png') are
-            # valid PQC evidence. Accept them -- parse() will run OCR.
+            # Binary formats need text extraction before keywords can be checked,
+            # so an unextracted binary is accepted for parse() to OCR/extract.
+            # But claiming EVERY pdf/docx/image on extension alone contradicts the
+            # rule every other parser follows -- dispatch is by content signature,
+            # never by filename -- and would let any ISO policy PDF be answered by
+            # the PQC parser. When the caller has already extracted text, gate on
+            # it exactly as the plain-text path below does.
+            if content and content.strip():
+                return _count_pqc_signals(content.lower()) >= 2
             return True
 
         # ── Plain-text / config formats ──────────────────────────────────────
@@ -1513,6 +1619,14 @@ class PQCParser(BaseParser):
         info_findings: List[Finding] = []
         accepted_spans: List[Tuple[int, int]] = []
 
+        # Per-line dedup state. A cipher list names the same primitive several
+        # times on one line (ECDHE-RSA-...:ECDHE-RSA-...:ECDHE-RSA-...), and
+        # emitting one finding per occurrence produced 3x duplicates carrying an
+        # identical evidence quote -- which inflated the P1/P2 counts the
+        # dashboard and executive summary are built from.
+        _dedup_seen: Dict[Tuple[str, str, str], Finding] = {}
+        _dedup_counts: Dict[Tuple[str, str, str], int] = {}
+
         def _overlaps(start: int, end: int) -> bool:
             for s, e in accepted_spans:
                 if start < e and end > s:
@@ -1529,6 +1643,32 @@ class PQCParser(BaseParser):
                 algo_name = _resolve(namer, m)
                 severity = _resolve(severity_rule, m)
                 evidence_line = _line_containing(content, start, end)
+
+                # A commented-out directive is not a deployed algorithm. Scanning the
+                # whole file meant a config that had already migrated -- classical
+                # ciphers left in place as commented reference, only X25519MLKEM768
+                # active -- still produced CRITICAL/HIGH findings for RSA, ECC P-384
+                # and ECDHE. Reporting quantum-vulnerable crypto from lines that
+                # explicitly say it is no longer in use is the same class of false
+                # positive as reading remediation prose as a live vulnerability.
+                #
+                # Only a line that BEGINS with a comment marker is skipped, so a real
+                # directive carrying a trailing comment ("ssl_ciphers ...;  # legacy")
+                # is still assessed.
+                if _is_comment_line(evidence_line):
+                    continue
+
+                # Collapse repeat hits of the same algorithm on the same line to
+                # a single finding, recording how many times it appeared. Keyed
+                # on the evidence line (not the whole document) so the same
+                # algorithm configured on two different directives stays two
+                # findings -- those are genuinely separate facts.
+                dedup_key = (rule_id, algo_name, evidence_line)
+                if dedup_key in _dedup_seen:
+                    _dedup_counts[dedup_key] += 1
+                    continue
+                _dedup_counts[dedup_key] = 1
+
                 asset_ctx = _find_asset_context(content, start, filename)
 
                 # Enhancement 2: exposure-based severity escalation (EXTERNAL only).
@@ -1574,13 +1714,35 @@ class PQCParser(BaseParser):
                     elif _inferred_cat in _INTERNAL_CATEGORIES:
                         exposure_context = "INTERNAL"
 
+                # Track whether escalation actually fired, so post-pass 2 explains
+                # only the findings whose severity really did change. A finding
+                # that was already CRITICAL by rule, or an INFO-level SAFE one,
+                # is EXTERNAL too but was not escalated.
+                _was_escalated = False
                 if exposure_context == "EXTERNAL":
                     if severity == "MEDIUM":
                         severity = "HIGH"
+                        _was_escalated = True
                     elif severity == "HIGH":
                         severity = "CRITICAL"
+                        _was_escalated = True
 
-                if quantum_status == "VULNERABLE":
+                if rule_id in _CONFIG_PRESENCE_RULES:
+                    # Config-posture rule: the evidence is a directive or a file
+                    # path, not an algorithm, so do not claim an algorithm was
+                    # detected. quantum_status stays VULNERABLE so the HNDL/QV
+                    # risk scoring in control_mapper.py is unaffected.
+                    title = f"PQC Readiness Gap: {algo_name}"
+                    description = (
+                        f"Evidence in '{filename}' shows {algo_name} ({crypto_category}) is "
+                        f"configured, but the configuration specifies no post-quantum key "
+                        f"exchange or signature algorithm. Traffic protected by this service "
+                        f"therefore relies entirely on classical cryptography and is exposed "
+                        f"to 'harvest now, decrypt later' capture. This finding reports a "
+                        f"missing post-quantum capability, not a specific weak algorithm."
+                    )
+                    remediation = _get_remediation_vulnerable(algo_name, crypto_category)
+                elif quantum_status == "VULNERABLE":
                     title = f"Quantum-Vulnerable Algorithm Detected: {algo_name}"
                     description = (
                         f"Evidence in '{filename}' shows use of {algo_name} ({crypto_category}). "
@@ -1627,6 +1789,11 @@ class PQCParser(BaseParser):
                 _cat_window = content[max(0, start - 400): min(len(content), end + 400)]
                 finding.asset_category = _classify_asset_category(asset_ctx, filename, _cat_window)
                 finding.quantum_status = quantum_status
+                # Which rule produced this, for the post-loop suppression pass.
+                # Underscore-prefixed so it stays out of to_dict()/serialisation.
+                finding._pqc_rule_id = rule_id
+                finding._pqc_severity_escalated = _was_escalated
+                _dedup_seen[dedup_key] = finding
 
                 # Enhancement B/D infrastructure: best-effort asset_name
                 # enrichment, ONLY when Phase-1's stricter _find_asset_context()
@@ -1670,6 +1837,30 @@ class PQCParser(BaseParser):
                 else:
                     info_findings.append(finding)
 
+        # ── POST-PASS 1: record repeat occurrences collapsed by the dedup above ──
+        for _key, _count in _dedup_counts.items():
+            if _count > 1:
+                _f = _dedup_seen.get(_key)
+                if _f is not None:
+                    _f.description = (
+                        f"{_f.description} This algorithm appears {_count} times on the "
+                        f"cited line (for example, repeated across a cipher suite list); "
+                        f"they are reported once as a single configuration fact."
+                    )
+
+        # ── POST-PASS 2: explain an exposure-driven severity escalation ─────────
+        # Severity is escalated one step for internet-facing assets, which is why
+        # the same algorithm can be CRITICAL in an edge config and HIGH in an
+        # internal one. Without saying so, that reads to an auditor as the tool
+        # contradicting itself, so state the reason on the finding.
+        for _f in actionable_findings:
+            if getattr(_f, "_pqc_severity_escalated", False):
+                _f.description = (
+                    f"{_f.description} Severity is escalated one level because this asset "
+                    f"is internet-facing, which makes 'harvest now, decrypt later' capture "
+                    f"of the traffic practical for a remote adversary."
+                )
+
         # ── EXTENDED SCAN: OID / IANA Cipher Suite / liboqs algorithms ────────
         # Runs the offline pqc_crypto_db lookup on the same text to catch
         # algorithm references expressed as:
@@ -1682,7 +1873,13 @@ class PQCParser(BaseParser):
 
         def _make_db_finding(name: str, meta: dict, evidence_hint: str, source_tag: str) -> Finding:
             qs = meta.get("quantum_status", "VULNERABLE")
-            sev = meta.get("severity", "HIGH")
+            # A quantum-SAFE hit must never inherit the VULNERABLE default of
+            # HIGH. liboqs_algorithms.json carries no 'severity' key at all, so
+            # all 46 of its post-quantum entries were landing as HIGH-severity
+            # *actionable* findings -- i.e. a correctly deployed FrodoKEM or
+            # Kyber768 was reported as a high-severity problem. SAFE hits are
+            # informational, exactly as the regex table's own PQC rules are.
+            sev = meta.get("severity") or (_SEV_INFO if qs == "SAFE" else "HIGH")
             category = meta.get("category", "Cryptographic Algorithm")
             nist_ref = meta.get("nist_ref", "")
             cwe = meta.get("cwe", "")
@@ -1728,6 +1925,23 @@ class PQCParser(BaseParser):
                 source_tool="PQC-Scan",
             )
             db_finding.quantum_status = qs
+            # Tag PQC-safe hits from this scan with the same marker the regex
+            # rules use, so the readiness-gap suppression below counts a
+            # post-quantum algorithm expressed only as an X.509 OID, an IANA
+            # suite code, or a liboqs keyword as real evidence of PQC.
+            # liboqs (source_tag 'oqs') is a post-quantum algorithm database in
+            # its entirety, but its entries carry no 'category', so match on the
+            # source there and on the category for the OID database (whose SAFE
+            # entries are all labelled 'PQC ...'). A SAFE hit that is merely
+            # quantum-resistant symmetric crypto (AES-256) must NOT qualify --
+            # it does not make a "no post-quantum suite configured" gap false.
+            db_finding._pqc_rule_id = (
+                "pqc-extended-scan"
+                if qs == "SAFE" and (
+                    source_tag == "oqs" or "PQC" in (category or "").upper()
+                )
+                else ""
+            )
             db_finding.asset_name = filename
             db_finding.asset_category = _classify_asset_category("", filename, content[:500])
             _assign_crypto_layers(db_finding, name, category, meta=meta, content=content)
@@ -1841,6 +2055,34 @@ class PQCParser(BaseParser):
                             break
                     if f.migration_dependency_flag:
                         break
+
+        # ── POST-PASS 3: drop PQC-readiness gaps that a PQC algorithm disproves ──
+        # A config that already negotiates ML-KEM / ML-DSA is not "TLS enabled
+        # with no post-quantum suite"; emitting both would have the report assert
+        # and deny the same fact on one page. Runs here, after the extended
+        # OID/IANA/liboqs scan, so a post-quantum algorithm expressed only as an
+        # X.509 OID or an IANA suite code still counts as evidence of PQC.
+        _has_pqc_algorithm = any(
+            getattr(_f, "_pqc_rule_id", "") in _PQC_ALGORITHM_RULES
+            for _f in actionable_findings + info_findings
+        )
+        if _has_pqc_algorithm:
+            _before = len(actionable_findings) + len(info_findings)
+            actionable_findings = [
+                _f for _f in actionable_findings
+                if getattr(_f, "_pqc_rule_id", "") not in _CONFIG_PRESENCE_RULES
+            ]
+            info_findings = [
+                _f for _f in info_findings
+                if getattr(_f, "_pqc_rule_id", "") not in _CONFIG_PRESENCE_RULES
+            ]
+            _dropped = _before - (len(actionable_findings) + len(info_findings))
+            if _dropped:
+                print(
+                    f"[PQC PARSER] '{filename}': suppressed {_dropped} PQC-readiness gap "
+                    f"finding(s) -- a NIST post-quantum algorithm is present in this file.",
+                    flush=True,
+                )
 
         map_pqc_findings_list(actionable_findings)
         map_pqc_findings_list(info_findings)

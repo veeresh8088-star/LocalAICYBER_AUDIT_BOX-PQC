@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys
+import re
 import os
 import time
 
@@ -24,7 +25,7 @@ failed_resolutions = []
 for keywords, target in _DIRECT_KEYWORD_CONTROL_MAP:
     for kw in keywords:
         sample_query = f"Please audit the organization regarding {kw} and verify evidence."
-        res = _resolve_control(sample_query, use_cases)
+        res = _resolve_control(q_text=sample_query, use_cases=use_cases)
         target_cid = target.split(" ")[0]
         got_cid = res.get("control_id")
         if got_cid == target_cid:
@@ -43,7 +44,11 @@ else:
 # 2. ALL 93 ISO CONTROLS RESOLUTION BY EXACT ID & NAME
 # -------------------------------------------------------------
 print("\n[TEST 2] Testing Exact ID & Label Resolution for all 93 ISO controls...")
-iso_ucs = [uc for uc in USE_CASES if not str(uc["use_case"]).startswith("VAPT")]
+# USE_CASES holds every framework, not just ISO: NIST CSF (GV./ID./PR./DE./RS./RC.),
+# SOC 2 (CC*), DPDP, BCMS, XBOM and PQC all live here too. Excluding only "VAPT"
+# swept 109 non-ISO entries into this test and reported them as ISO failures.
+# Match the ISO 27001:2022 Annex A shape instead -- clause "<digits>.<digits> ".
+iso_ucs = [uc for uc in USE_CASES if re.match(r"^\d+\.\d+ ", str(uc["use_case"]))]
 id_pass = 0
 id_fail = []
 
@@ -52,16 +57,16 @@ for uc in iso_ucs:
     cname = uc.get("label", "")
     
     # Query with ID
-    res1 = _resolve_control(f"Audit check for {cid}", use_cases)
+    res1 = _resolve_control(id_text=f"Audit check for {cid}", use_cases=use_cases)
     # Query with Control Full Label
-    res2 = _resolve_control(f"Does the organization have {cname}?", use_cases)
+    res2 = _resolve_control(name_text=cname, q_text=f"Does the organization have {cname}?", use_cases=use_cases)
     
     if res1.get("control_id") == cid and res2.get("control_id") == cid:
         id_pass += 1
     else:
         id_fail.append((cid, res1.get("control_id"), res2.get("control_id")))
 
-print(f"-> Exact ID & Label Matching: {id_pass}/93 ISO controls resolved accurately.")
+print(f"-> Exact ID & Label Matching: {id_pass}/{len(iso_ucs)} ISO controls resolved accurately.")
 if id_fail:
     for cid, r1, r2 in id_fail:
         print(f"   MISMATCH: {cid} -> by ID: {r1}, by Name: {r2}")
@@ -74,7 +79,7 @@ vapt_ucs = [uc for uc in USE_CASES if str(uc["use_case"]).startswith("VAPT")]
 vapt_pass = 0
 for uc in vapt_ucs:
     cid = str(uc["use_case"]).split(" ")[0]
-    res = _resolve_control(f"Review findings for {cid}", use_cases)
+    res = _resolve_control(q_text=f"Review findings for {cid}", use_cases=use_cases)
     if res.get("control_id") == cid:
         vapt_pass += 1
 print(f"-> VAPT ID Matching: {vapt_pass}/15 VAPT controls resolved accurately.")

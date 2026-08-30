@@ -45,10 +45,19 @@
     build:
       context: .
       dockerfile: Dockerfile.llm
-    image: aicyberauditbox-llm:3.10
+    image: aicyberauditbox-llm:3.21
     container_name: aicyberauditbox_llm
     environment:
       - LLM_MODE=completion
+      # Tokens each request may use. 16384 (the previous default) admits only
+      # ~14 of the 30 passages Deep-mode retrieval hands over, so the model was
+      # shown less than half its evidence; 32768 clears all 30 with headroom.
+      # The entrypoint sizes slots from this container's RAM and sets
+      # -c = slots x this value, so the total pool grows with the machine while
+      # each request keeps a fixed, sufficient share.
+      #   RAM needed ~= 4.5GB + slots x 1.92GB
+      #   12GB -> 2 slots (65,536 pool)   16GB -> 4 slots (131,072 pool)
+      - MIN_CTX_PER_REQUEST=32768
       # LLM_THREADS intentionally NOT set here -- docker/llm-entrypoint.sh
       # auto-detects the container's actual CPU allowance (cgroup quota, or
       # the host's full core count if uncapped) and uses all of it by
@@ -58,13 +67,26 @@
       # Uncomment to override the auto-sized slot count instead of letting
       # docker/llm-entrypoint.sh detect it from this container's RAM:
       # - LLM_SLOTS_OVERRIDE=2
+    #
+    # ── Give this container an explicit RAM allowance on a large host ────────
+    # Slots are bounded by RAM and by CPU cores, both detected at start. RAM is
+    # read from this container's cgroup limit -- and when no limit is set, that
+    # detection falls back to the HOST's total, so the LLM sizes itself as though
+    # it owned the whole machine and can crowd out the app, database and
+    # embedding server. Harmless on a laptop, not on a 96GB server.
+    #
+    # Budget roughly:  4.5GB (model + base) + slots x 1.92GB (KV at 32k, 8-bit)
+    #   10 concurrent auditors -> 12 slots -> ~28GB
+    # Leave the rest for the app container (~8GB + ~0.8GB per active session),
+    # Postgres and Redis.
+    # mem_limit: 28g
     restart: always
 
   llm-embed:
     build:
       context: .
       dockerfile: Dockerfile.llm
-    image: aicyberauditbox-llm-embed:3.10
+    image: aicyberauditbox-llm-embed:3.21
     container_name: aicyberauditbox_llm_embed
     environment:
       - LLM_MODE=embedding
@@ -77,7 +99,7 @@
     build:
       context: .
       dockerfile: Dockerfile.app
-    image: aicyberauditbox-app:3.16
+    image: aicyberauditbox-app:3.21
     container_name: aicyberauditbox_app
     # Shares shakthidb's network namespace so "localhost:15234" inside this
     # container genuinely reaches Postgres, matching database.py's hardcoded
@@ -100,6 +122,15 @@
       - LLM_HOSTS=llm:11434
       - EMBEDDING_HOST=http://llm-embed:11435
       - REDIS_URL=redis://redis:6379/0
+      # Must equal the llm service's MIN_CTX_PER_REQUEST above.
+      # With --kv-unified, llama-server reports the WHOLE shared pool as every
+      # slot's n_ctx, so get_real_num_ctx() reads (for example) 131072 and sizes
+      # each prompt as though it owned the entire buffer -- with 4 slots active
+      # that is a 4x over-commit, and llama.cpp responds by stalling rather than
+      # erroring. Pinning it here makes the app budget against the real
+      # per-request share. /props exposes n_ctx and total_slots but not
+      # kv_unified, so this cannot be detected automatically.
+      - LLM_NUM_CTX=32768
       # Every containerized deployment must use ShaktiDB -- never silently fall
       # back to the container-local SQLite file (see database.py's except branch).
       - REQUIRE_POSTGRES=1

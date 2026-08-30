@@ -7,8 +7,8 @@
 #   -np (parallel slot count) auto-sizes to this container's actual available
 #   RAM, mirroring the same formula src/core/resource_guard.py uses for the
 #   app's own concurrency semaphore (see that file for the full explanation):
-#   baseline ~8GB fixed overhead, ~2.5GB KV cache per additional full-context
-#   slot, 0.85 safety margin, floor of 1. Duplicated here in shell because
+#   each slot is first given MIN_CTX_PER_REQUEST tokens (enough to hold a
+#   real audit prompt), then as many such slots as RAM allows. Duplicated here in shell because
 #   this is a separate container image with no Python app code to import
 #   resource_guard.py from.
 # LLM_MODE=embedding: embedding-only server, port 11435, nomic-embed-text.
@@ -98,18 +98,99 @@ if [ "$LLM_MODE" = "embedding" ]; then
 fi
 
 # completion mode
-# These MUST stay in sync with resource_guard.py and llm_client.py:
-# model_gb=4.0, slot_gb=0.5 — if you change one, change all three.
+# Keep these in sync with resource_guard.py (same MIN_CTX_PER_REQUEST /
+# KV_GB_PER_1K_FP16 / KV_QUANT inputs) -- change one, change both.
 FIXED_OVERHEAD_GB="${RESOURCE_GUARD_FIXED_OVERHEAD_GB:-4.5}"
-PER_SLOT_GB="${RESOURCE_GUARD_PER_SLOT_GB:-0.5}"
 SAFETY_MARGIN="${RESOURCE_GUARD_SAFETY_MARGIN:-0.85}"
 
+# Sizing rule: give each slot a context that can actually hold a real audit
+# prompt FIRST, then fit as many slots as RAM allows -- never the reverse.
+#
+# The previous formula maximised slot COUNT against a flat 0.5GB/slot guess
+# and a hardcoded `-c 32768`. llama.cpp divides -c evenly across -np, so on a
+# 24GB box that produced 8 slots of 32768/8 = 4096 tokens each -- too small to
+# hold this app's generator prompt (~4k template) plus retrieved evidence.
+# Prompts were silently trimmed and findings came out wrong. Confirmed on a
+# customer deployment, whose /props reported {"n_ctx":4096,"total_slots":8}.
+#
+# MIN_CTX_PER_REQUEST is the floor a slot must offer to be useful, sized from
+# the largest real control: ~11k tokens of evidence for a 40-chunk PDF (see
+# config/retrieval_config.json) + ~4k prompt template + ~1.5k completion.
+MIN_CTX_PER_REQUEST="${MIN_CTX_PER_REQUEST:-16384}"
+
+# KV-cache cost expressed PER 1024 TOKENS so it scales with the context we
+# actually ask for. The old PER_SLOT_GB was a flat per-slot figure pinned to
+# `-c 32768`; raising the context while leaving it untouched would
+# over-provision slots and OOM the box. Derived from that same calibration
+# (0.5GB per 4096-token FP16 slot). MEASURE against your model and override
+# rather than trusting this -- llama-server prints the real KV size at load.
+KV_GB_PER_1K_FP16="${KV_GB_PER_1K_FP16:-0.12}"
+
+# Upper bound on parallel slots, derived rather than fixed.
+#
+# This was a hardcoded 8, which is a statement about a machine rather than about
+# this machine: it silently capped a 64-core server at 8 concurrent auditors no
+# matter how much CPU and RAM it had, while on a small box the RAM bound below
+# was doing all the work and the 8 never mattered. Neither case was described by
+# the constant.
+#
+# Slots are bounded by the two things that actually constrain them:
+#   * RAM   -- the KV cache each slot needs (applied in the SLOTS calculation)
+#   * CPU   -- past one slot per core, concurrent requests are sharing cores and
+#              each one simply runs proportionally slower, so more slots buy
+#              queueing rather than throughput.
+# This mirrors run_all.bat, which caps -np the same way. LLM_MAX_SLOTS still
+# overrides for an operator who has measured their own hardware.
+MAX_SLOTS="${LLM_MAX_SLOTS:-$DETECTED_CORES}"
+if [ -z "$MAX_SLOTS" ] || [ "$MAX_SLOTS" -lt 1 ] 2>/dev/null; then
+    MAX_SLOTS=2
+fi
+
+# Optional flags are probed against THIS build's own --help rather than
+# assumed. The base image is an unpinned floating tag
+# (ghcr.io/ggml-org/llama.cpp:server), so a flag present today can disappear
+# tomorrow -- and an unknown flag makes llama-server exit at startup, which on
+# a customer box takes the whole audit stack down. Probe first, then add.
+HELP_TEXT="$(/app/llama-server --help 2>&1 || true)"
+
+supports_flag() {
+    printf '%s' "$HELP_TEXT" | grep -q -- "$1"
+}
+
+EXTRA_ARGS=""
+
+# Unified KV cache: one shared buffer for all sequences, instead of -c split
+# into -np fixed partitions. This is what lets a heavy control borrow tokens
+# from idle slots -- the shared-pool behaviour this deployment is specified to
+# have. Set KV_UNIFIED=0 to opt out.
+if [ "${KV_UNIFIED:-1}" = "1" ] && supports_flag "--kv-unified"; then
+    EXTRA_ARGS="$EXTRA_ARGS --kv-unified"
+    KV_UNIFIED_ON="yes"
+else
+    KV_UNIFIED_ON="no"
+fi
+
+# 8-bit KV cache: halves KV RAM, which is what makes the larger per-slot
+# context affordable. run_all.bat has always used this; this container never
+# did, so the customer paid full FP16 price per slot. Set KV_QUANT=0 to opt out.
+if [ "${KV_QUANT:-1}" = "1" ] && supports_flag "-ctk"; then
+    EXTRA_ARGS="$EXTRA_ARGS -ctk q8_0 -ctv q8_0"
+    KV_BYTES_SCALE="0.5"
+    KV_QUANT_ON="yes"
+else
+    KV_BYTES_SCALE="1.0"
+    KV_QUANT_ON="no"
+fi
+
 TOTAL_GB=$(detect_total_mem_gb)
-MAX_SLOTS=8   # cap matches llm_client.py: max(1, min(8, ...))
-SLOTS=$(awk -v t="$TOTAL_GB" -v o="$FIXED_OVERHEAD_GB" -v p="$PER_SLOT_GB" -v m="$SAFETY_MARGIN" -v max="$MAX_SLOTS" '
+GB_PER_SLOT=$(awk -v c="$MIN_CTX_PER_REQUEST" -v k="$KV_GB_PER_1K_FP16" -v s="$KV_BYTES_SCALE" '
+    BEGIN { printf "%.4f", (c / 1024) * k * s }
+')
+SLOTS=$(awk -v t="$TOTAL_GB" -v o="$FIXED_OVERHEAD_GB" -v g="$GB_PER_SLOT" -v m="$SAFETY_MARGIN" -v max="$MAX_SLOTS" '
     BEGIN {
         usable = (t * m) - o
-        slots = int(usable / p)
+        if (g <= 0) g = 1
+        slots = int(usable / g)
         if (slots < 1)    slots = 1
         if (slots > max)  slots = max
         print slots
@@ -120,17 +201,37 @@ if [ -n "$LLM_SLOTS_OVERRIDE" ]; then
     SLOTS="$LLM_SLOTS_OVERRIDE"
     echo "[LLM ENTRYPOINT] LLM_SLOTS_OVERRIDE set -- using $SLOTS slots instead of auto-detection."
 else
-    echo "[LLM ENTRYPOINT] Detected ${TOTAL_GB}GB available -> auto-sized to $SLOTS concurrent slot(s)."
+    # Name the binding constraint, so an operator can see at a glance whether
+    # adding RAM or adding cores would raise concurrency on this machine.
+    RAM_ONLY_SLOTS=$(awk -v t="$TOTAL_GB" -v o="$FIXED_OVERHEAD_GB" -v g="$GB_PER_SLOT" -v m="$SAFETY_MARGIN" '
+        BEGIN { u=(t*m)-o; if (g<=0) g=1; s=int(u/g); if (s<1) s=1; print s }')
+    if [ "$RAM_ONLY_SLOTS" -gt "$MAX_SLOTS" ] 2>/dev/null; then
+        BOUND="CPU (${MAX_SLOTS} core(s); RAM alone would allow ${RAM_ONLY_SLOTS})"
+    else
+        BOUND="RAM (${TOTAL_GB}GB; ${MAX_SLOTS} core(s) available)"
+    fi
+    echo "[LLM ENTRYPOINT] Detected ${TOTAL_GB}GB and ${MAX_SLOTS} core(s), ~${GB_PER_SLOT}GB per ${MIN_CTX_PER_REQUEST}-token slot -> $SLOTS slot(s), bounded by $BOUND."
 fi
+
+# Total pool = slots x per-request floor. With --kv-unified this is one shared
+# buffer any sequence can draw from, so an idle slot's tokens are reusable by a
+# busy one; without it, llama.cpp partitions it back into per-slot regions of
+# exactly MIN_CTX_PER_REQUEST each. Either way no slot drops below the floor.
+TOTAL_CTX=$(( SLOTS * MIN_CTX_PER_REQUEST ))
 
 LLM_T="${LLM_THREADS:-$DETECTED_CORES}"
 echo "[LLM ENTRYPOINT] Detected ${DETECTED_CORES} CPU core(s) -> using ${LLM_T} thread(s) for the completion server."
+echo "[LLM ENTRYPOINT] Context: -c ${TOTAL_CTX} across ${SLOTS} slot(s) = ${MIN_CTX_PER_REQUEST} tokens per request (kv_unified=${KV_UNIFIED_ON}, kv_8bit=${KV_QUANT_ON})."
 
+# EXTRA_ARGS is deliberately unquoted: it carries multiple probed flags that
+# must word-split into separate argv entries.
+# shellcheck disable=SC2086
 exec /app/llama-server \
     --host 0.0.0.0 --port 11434 \
     -m /models/google_gemma-4-E4B-it-Q4_K_M.gguf \
-    -c 32768 -np "$SLOTS" \
+    -c "$TOTAL_CTX" -np "$SLOTS" \
     -t "$LLM_T" \
     -b 512 -ub 256 \
     --cont-batching \
-    --flash-attn on
+    --flash-attn on \
+    $EXTRA_ARGS

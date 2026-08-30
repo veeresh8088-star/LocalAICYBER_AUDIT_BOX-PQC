@@ -1,5 +1,5 @@
 import re
-from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Request
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Request, Form
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from src.db.database import (
@@ -259,8 +259,17 @@ def api_get_framework_controls(request: Request):
         raise HTTPException(status_code=500, detail="Failed to load framework controls.")
 
 @router.post("/parse-scope-excel")
-async def api_parse_scope_excel(request: Request, file: UploadFile = File(...)):
-    """Parses an uploaded auditor scope Excel mapping (.xlsx/.xls) and returns mapped control SLs and custom evidence."""
+async def api_parse_scope_excel(request: Request, file: UploadFile = File(...),
+                                framework: str = Form(None)):
+    """Parses an uploaded auditor scope Excel mapping (.xlsx/.xls) and returns mapped control SLs and custom evidence.
+
+    `framework` confines control resolution to the standard being audited. A row
+    that carries no control ID is otherwise matched by name or question against
+    all 217 controls from all eight frameworks -- an ISO row reading
+    "Cryptographic Controls" resolved to SOC 2 CC3.4 rather than ISO 8.24, and
+    the auditor's evidence was then judged against the wrong requirement.
+    Optional: omitted means the previous all-framework behaviour.
+    """
     _require_auth(request)
     if not file.filename.lower().endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are supported.")
@@ -289,7 +298,7 @@ async def api_parse_scope_excel(request: Request, file: UploadFile = File(...)):
             tmp_path = tmp.name
 
         try:
-            items = parse_excel_scoping_checklist(tmp_path)
+            items = parse_excel_scoping_checklist(tmp_path, framework=framework)
         finally:
             try:
                 if os.path.exists(tmp_path):

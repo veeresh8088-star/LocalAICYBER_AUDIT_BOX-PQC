@@ -95,22 +95,51 @@ if %LLM_THREADS% LSS 1 set LLM_THREADS=4
 set /a EMBED_THREADS=%NUMBER_OF_PROCESSORS%
 if %EMBED_THREADS% LSS 1 set EMBED_THREADS=4
 
-:: Calculate parallel LLM slots for llama.cpp continuous batching.
-:: -np is matched to the physical CPU core count detected above so every core is
-:: utilised at peak efficiency. The 128k context (-c 131072) is a single fluid
-:: shared token pool (PagedAttention via --cont-batching): light prompts consume
-:: little, heavy multi-document audits grow dynamically into the free capacity.
-:: 8-bit KV-cache (-ctk q8_0 -ctv q8_0) halves cache RAM (~9 GB vs ~18 GB FP16)
-:: with 0.0%% audit reasoning accuracy loss.
+:: Calculate parallel LLM slots and the total context pool.
+::
+:: -c is now DERIVED (slots x MIN_CTX_PER_REQUEST) instead of being pinned at
+:: 131072. With a fixed -c, llama.cpp gives each of the -np slots only
+:: (-c / -np) tokens, so per-request context SHRANK as the machine got bigger:
+:: 32,768 on a 4-core box, 8,192 on 16 cores, and 2,048 on a 64-core server --
+:: far below the ~29,000 tokens a 30-chunk retrieval needs, which would have
+:: silently starved the model of evidence on exactly the hardware being quoted
+:: to customers. Deriving -c keeps every request at MIN_CTX_PER_REQUEST no
+:: matter how many cores are present.
+::
+:: Slots are capped by RAM as well as cores, using the same arithmetic as
+:: docker/llm-entrypoint.sh (keep the two in sync): each slot costs
+:: (ctx/1024) x 0.12 x 0.5 GB with 8-bit KV, on top of ~4.5GB of model and OS.
+if "%MIN_CTX_PER_REQUEST%"=="" set MIN_CTX_PER_REQUEST=32768
+
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -Command ^
+  "$gb=[math]::Round((Get-CIMInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2);" ^
+  "$perSlot=(%MIN_CTX_PER_REQUEST%/1024)*0.12*0.5;" ^
+  "$usable=($gb*0.85)-4.5;" ^
+  "$s=[math]::Floor($usable/$perSlot); if($s -lt 1){$s=1};" ^
+  "Write-Output $s"`) do set RAM_SLOTS=%%R
+if "%RAM_SLOTS%"=="" set RAM_SLOTS=2
+
 if "%LLM_SLOTS%"=="" set LLM_SLOTS=%PHYSICAL_CORES%
 if "%LLM_SLOTS%"=="" set LLM_SLOTS=4
+if %RAM_SLOTS% LSS %LLM_SLOTS% set LLM_SLOTS=%RAM_SLOTS%
+if %LLM_SLOTS% LSS 1 set LLM_SLOTS=1
+
+set /a LLM_TOTAL_CTX=%LLM_SLOTS% * %MIN_CTX_PER_REQUEST%
+
+:: --kv-unified makes -c one shared buffer instead of -np fixed partitions, so an
+:: idle slot's tokens are reusable by a busy one. This is the "fluid shared pool"
+:: this launcher has always claimed in its banner but never actually enabled.
+:: Because llama-server then reports the WHOLE pool as each slot's n_ctx,
+:: LLM_NUM_CTX is pinned below so the app budgets prompts against the real
+:: per-request share rather than the full pool.
+set LLM_NUM_CTX=%MIN_CTX_PER_REQUEST%
 
 
 
 
 echo.
-echo [3/6] Starting llama.cpp LLM Server (%PHYSICAL_CORES% Physical Cores -> %LLM_SLOTS% Parallel Slots / 128k Fluid Shared Pool / 8-bit KV Cache)...
-start "Llama LLM Server" /d "%LLAMA_DIR%" /min "%LLAMA_SERVER_EXE%" --port 11434 -m "%~dp0google_gemma-4-E4B-it-Q4_K_M.gguf" -c 131072 -np %LLM_SLOTS% -t %LLM_THREADS% -b 2048 -ub 512 --flash-attn on --cont-batching -ctk q8_0 -ctv q8_0
+echo [3/6] Starting llama.cpp LLM Server (%PHYSICAL_CORES% Physical Cores -^> %LLM_SLOTS% Slots x %MIN_CTX_PER_REQUEST% tokens = %LLM_TOTAL_CTX% Fluid Shared Pool / 8-bit KV Cache)...
+start "Llama LLM Server" /d "%LLAMA_DIR%" /min "%LLAMA_SERVER_EXE%" --port 11434 -m "%~dp0google_gemma-4-E4B-it-Q4_K_M.gguf" -c %LLM_TOTAL_CTX% -np %LLM_SLOTS% -t %LLM_THREADS% -b 2048 -ub 512 --flash-attn on --cont-batching --kv-unified -ctk q8_0 -ctv q8_0
 
 echo.
 echo [4/6] Starting llama.cpp Embedding Server (Port 11435 with %EMBED_THREADS% threads)...

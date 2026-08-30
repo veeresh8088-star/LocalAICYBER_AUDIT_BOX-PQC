@@ -64,11 +64,35 @@ def format_loop_hints(feedbacks):
                 known_non_compliant.append(f"- For Control {control_id}: Note that a previous finding was REJECTED by the auditor: \"{finding}\". Do NOT repeat or generate this false finding.")
             continue
 
-        # Filter comments content to only keep navigation/structure information
+        # A STATUS CORRECTION is knowledge on its own, with or without a comment.
+        #
+        # This used to `continue` whenever auditor_comments was empty, which
+        # discarded the single most valuable signal the loop can receive: an
+        # auditor changing NON_COMPLIANT to COMPLIANT (or the reverse) on a
+        # control the model got wrong. The correction is written to
+        # AuditorFeedback.corrected_status by the finding-edit endpoint, but
+        # auditor_comments is only populated when someone also types free text --
+        # and most auditors just change the dropdown. Verified against the live
+        # table: two of the three most recent real feedback rows had empty
+        # comments and were both dropped here, so the model was told nothing.
+        #
+        # Emitted as a prior, not as evidence: the prompt tells the model an
+        # auditor previously reached a different conclusion on this control and
+        # to weigh the evidence carefully -- it must not copy the verdict, which
+        # would be a different bug (a finding asserted from no evidence at all).
         cleaned_comment = str(comments).strip()
         if not cleaned_comment:
+            corrected = status_upper.replace("-", "_")
+            if corrected in ("COMPLIANT", "NON_COMPLIANT", "PARTIAL_COMPLIANT", "FALSE_POSITIVE"):
+                known_non_compliant.append(
+                    f"- For Control {control_id}: an auditor previously reviewed this control and "
+                    f"recorded it as {corrected}. Treat that as a prior from a human reviewer, not "
+                    f"as evidence -- assess the uploaded documents on their own merits and only "
+                    f"agree if the evidence supports it."
+                )
             continue
-            
+
+
         # Parse into hints category
         if "section" in cleaned_comment.lower() or "heading" in cleaned_comment.lower() or "page" in cleaned_comment.lower():
             section_hints.append(f"- For Control {control_id}: look near sections matching {cleaned_comment}")

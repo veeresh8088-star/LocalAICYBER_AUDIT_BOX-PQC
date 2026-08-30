@@ -703,7 +703,7 @@ function saveSessionScopingCache(sessionId, customEvidenceData, mode) {
             custom_evidence: customEvidenceData,
             scoping_mode: mode || "Excel Scoping"
         }));
-    } catch (e) {}
+    } catch (e) { }
 }
 
 function restoreSessionScopingCache(sessionId) {
@@ -713,7 +713,7 @@ function restoreSessionScopingCache(sessionId) {
         try {
             const raw = localStorage.getItem(`scoping_cache_${sessionId}`);
             if (raw) data = JSON.parse(raw);
-        } catch (e) {}
+        } catch (e) { }
     }
     if (data && data.custom_evidence && data.custom_evidence.excel_items && data.custom_evidence.excel_items.length > 0) {
         customEvidenceMappings = data.custom_evidence;
@@ -1610,8 +1610,8 @@ function setAnalysisMode(mode) {
     const allBtns = [btnFastParser, btnQuick, btnDeep];
 
     const activeBtn = mode === "Technical findings only" ? btnFastParser
-                    : mode === "Quick" ? btnQuick
-                    : btnDeep;
+        : mode === "Quick" ? btnQuick
+            : btnDeep;
 
     allBtns.forEach(b => {
         if (!b) return;
@@ -1988,6 +1988,15 @@ async function handleExcelScopeUpload(e) {
 
     const formData = new FormData();
     formData.append("file", file);
+    // Confine control resolution to the framework being audited. Without it, a
+    // checklist row with no control ID is matched by name against all eight
+    // frameworks -- an ISO row reading "Cryptographic Controls" resolved to
+    // SOC 2 CC3.4 instead of ISO 8.24.
+    try {
+        const _fw = (typeof activeSessionFramework !== "undefined" && activeSessionFramework)
+            || (document.getElementById("framework-select") || {}).value || "";
+        if (_fw) formData.append("framework", _fw);
+    } catch (e) { /* framework is optional; omit rather than fail the upload */ }
 
     try {
         const response = await authFetch(`${API_BASE}/controls/parse-scope-excel`, {
@@ -3949,7 +3958,7 @@ function formatRemediationSteps(text, color) {
     // Detect if text has numbered steps: looks for " 1. ", " 2. " etc.
     // Use a regex that matches a number+period boundary anywhere in the string.
     const hasSteps = /(?:^|[.!?]\s+|:\s*)\d{1,2}\.\s+[A-Z]/m.test(safe)
-                  || /^\d{1,2}\.\s+/m.test(safe);
+        || /^\d{1,2}\.\s+/m.test(safe);
 
     if (!hasSteps) {
         // No numbered structure — render as plain paragraph
@@ -4278,6 +4287,17 @@ function getCleanFindingDescription(f) {
     let raw = f.description || f.finding || f.reasoning || f.gap_description || "";
     if (typeof raw !== "string") raw = String(raw);
 
+    // A control that was never evaluated must keep saying so. This rewrite exists
+    // to keep raw engine errors out of a customer-facing report, but applying it to
+    // a timeout replaced "was NOT evaluated" with polished compliance prose -- so a
+    // control the engine never assessed became indistinguishable from one it did.
+    // The auditor could not tell which findings were real.
+    const _isNotEvaluated =
+        String(f.status || f.final_result || "").toUpperCase() === "NOT_EVALUATED" ||
+        raw.includes("SYSTEM TIMEOUT") ||
+        raw.includes("was NOT evaluated");
+    if (_isNotEvaluated) return raw;
+
     if (raw.includes("Auditor engine encountered generation error") || raw.includes("LLM generation timeout") || raw.includes("parse error")) {
         const ctrlId = f.control_id || "target control";
         const ctrlName = f.control_name || f.title || ctrlId;
@@ -4346,13 +4366,14 @@ function renderPqcSummaryPanel(allFindings) {
     const qbomRowsRaw = pqcFindings.map(f => {
         const qs = String(f.quantum_status || "").trim().toUpperCase();
         const qsColor = qs === "VULNERABLE" ? "#ef4444" : qs === "WEAK" ? "#f59e0b" : "#10b981";
-        const qsIcon  = qs === "VULNERABLE" ? "🔴" : qs === "WEAK" ? "🟡" : "🟢";
+        const qsIcon = qs === "VULNERABLE" ? "🔴" : qs === "WEAK" ? "🟡" : "🟢";
         // The API sends "control_name" (not "title") — use that as the algorithm label.
         // Strip the verbose prefix so only the algorithm name (e.g. "RSA 2048", "ECC P-384") appears.
         const titleAlgo = (f.control_name || f.title || "")
             .replace("Quantum-Vulnerable Algorithm Detected: ", "")
             .replace("Classically Weak / Deprecated Algorithm Detected: ", "")
-            .replace("Quantum-Safe Algorithm Confirmed: ", "");
+            .replace("Quantum-Safe Algorithm Confirmed: ", "")
+            .replace("PQC Readiness Gap: ", "");
         const rawAsset = String(f.asset_name || f.target_host || "").trim();
         // QBOM "Asset" column = the algorithm name (matches RFP format: RSA2048 | VULNERABLE)
         // asset_name is the SYSTEM that has the algorithm — shown as a small sub-label below.
@@ -4378,7 +4399,8 @@ function renderPqcSummaryPanel(allFindings) {
         const titleAlgoKey = (f.control_name || f.title || "")
             .replace("Quantum-Vulnerable Algorithm Detected: ", "")
             .replace("Classically Weak / Deprecated Algorithm Detected: ", "")
-            .replace("Quantum-Safe Algorithm Confirmed: ", "").trim().toLowerCase();
+            .replace("Quantum-Safe Algorithm Confirmed: ", "")
+            .replace("PQC Readiness Gap: ", "").trim().toLowerCase();
         if (qbomSeen.has(titleAlgoKey)) return false;
         qbomSeen.add(titleAlgoKey);
         return true;
@@ -4395,8 +4417,8 @@ function renderPqcSummaryPanel(allFindings) {
         const rdyLower = rdy.toLowerCase();
         const rdyColor = rdyLower.includes("upgrade") || rdyLower.includes("required") ? "#ef4444"
             : rdyLower.includes("hybrid") || rdyLower.includes("roadmap") ? "#f59e0b"
-            : rdyLower.includes("ready") || rdyLower.includes("compliant") ? "#10b981"
-            : "#94a3b8";
+                : rdyLower.includes("ready") || rdyLower.includes("compliant") ? "#10b981"
+                    : "#94a3b8";
         return `<tr style="border-bottom:1px solid var(--border-color, rgba(148,163,184,0.15));">
             <td style="padding:6px 10px; font-size:0.80rem; color:var(--text-main, #0f172a); font-weight:700;">${escapeHtml(f.oem_product)}</td>
             <td style="padding:6px 10px; font-size:0.80rem; font-weight:700; color:${rdyColor};">${escapeHtml(rdy)}</td>
@@ -4405,10 +4427,10 @@ function renderPqcSummaryPanel(allFindings) {
     }).join("");
 
     // ── Stats bar ───────────────────────────────────────────────────────────
-    const vulnCnt = pqcFindings.filter(f => String(f.quantum_status||"").toUpperCase()==="VULNERABLE").length;
-    const weakCnt = pqcFindings.filter(f => String(f.quantum_status||"").toUpperCase()==="WEAK").length;
-    const safeCnt = pqcFindings.filter(f => String(f.quantum_status||"").toUpperCase()==="SAFE").length;
-    const topRisk  = Math.max(...pqcFindings.map(f => Number(f.risk_score)||0), 0);
+    const vulnCnt = pqcFindings.filter(f => String(f.quantum_status || "").toUpperCase() === "VULNERABLE").length;
+    const weakCnt = pqcFindings.filter(f => String(f.quantum_status || "").toUpperCase() === "WEAK").length;
+    const safeCnt = pqcFindings.filter(f => String(f.quantum_status || "").toUpperCase() === "SAFE").length;
+    const topRisk = Math.max(...pqcFindings.map(f => Number(f.risk_score) || 0), 0);
 
     // ── Build panel HTML ────────────────────────────────────────────────────
     const panel = document.createElement("div");
@@ -4618,8 +4640,8 @@ function renderFindingsList() {
             } else {
                 // Short ID code like "PQC-2", "PQC-10", "VAPT-01", "5.15"
                 const descText = (ctrlNameStr && ctrlNameStr !== ctrlIdStr && !ctrlIdStr.toLowerCase().includes(ctrlNameStr.toLowerCase())) ? ctrlNameStr
-                               : (titleStr && titleStr !== ctrlIdStr && !ctrlIdStr.toLowerCase().includes(titleStr.toLowerCase())) ? titleStr
-                               : "";
+                    : (titleStr && titleStr !== ctrlIdStr && !ctrlIdStr.toLowerCase().includes(titleStr.toLowerCase())) ? titleStr
+                        : "";
                 displayHeaderTitle = descText ? `${ctrlIdStr} — ${descText}` : ctrlIdStr;
             }
         } else if (ctrlNameStr) {
@@ -4814,14 +4836,25 @@ function renderFindingsList() {
                     sevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.2); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🔵 P4 Low</span>`;
                 }
             } else {
+                // The CVSS number shown must be the one the scanner actually assessed.
+                // These labels used to be fixed strings per severity band -- every High
+                // read "CVSS 7.5" and every Critical "CVSS 9.8", regardless of the real
+                // score. An SSRF assessed at 8.6 was published to the customer as 7.5,
+                // and CVSS figures get quoted in remediation SLAs. Fall back to the band
+                // midpoint only when no score was stored (legacy rows).
+                const _score = Number(f.severity_score);
+                const _band = sUpper.includes("CRITICAL") || sUpper.includes("P1") ? 9.8
+                            : sUpper.includes("HIGH") || sUpper.includes("P2") ? 7.5
+                            : sUpper.includes("MEDIUM") || sUpper.includes("P3") ? 5.3 : 2.5;
+                const _cvss = (Number.isFinite(_score) && _score > 0) ? _score.toFixed(1) : _band.toFixed(1);
                 if (sUpper.includes("CRITICAL") || sUpper.includes("P1")) {
-                    sevBadgeHtml = `<span class="badge" style="background:rgba(239,68,68,0.2); color:#ef4444; border:1px solid rgba(239,68,68,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Critical (CVSS 9.8)</span>`;
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(239,68,68,0.2); color:#ef4444; border:1px solid rgba(239,68,68,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Critical (CVSS ${_cvss})</span>`;
                 } else if (sUpper.includes("HIGH") || sUpper.includes("P2")) {
-                    sevBadgeHtml = `<span class="badge" style="background:rgba(249,115,22,0.2); color:#f97316; border:1px solid rgba(249,115,22,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">High (CVSS 7.5)</span>`;
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(249,115,22,0.2); color:#f97316; border:1px solid rgba(249,115,22,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">High (CVSS ${_cvss})</span>`;
                 } else if (sUpper.includes("MEDIUM") || sUpper.includes("P3")) {
-                    sevBadgeHtml = `<span class="badge" style="background:rgba(245,158,11,0.2); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Medium (CVSS 5.3)</span>`;
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(245,158,11,0.2); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Medium (CVSS ${_cvss})</span>`;
                 } else {
-                    sevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.2); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Low (CVSS 2.5)</span>`;
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.2); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">Low (CVSS ${_cvss})</span>`;
                 }
             }
 
@@ -4862,47 +4895,47 @@ function renderFindingsList() {
                     </div>` : ""}
 
                     ${(isPqc && _quantumStatus) ? (() => {
-                        const _qsColor = _quantumStatus === "VULNERABLE" ? "#ef4444"
-                            : (_quantumStatus === "WEAK" ? "#f59e0b" : "#10b981");
-                        const _pqcExtras = [
-                            _caAlgo ? `CA Algorithm: ${escapeHtml(_caAlgo)}` : "",
-                            _keyAlgo ? `Key Algorithm: ${escapeHtml(_keyAlgo)}` : "",
-                            _protocolVer ? `Protocol: ${escapeHtml(_protocolVer)}` : "",
-                            _pqcPort ? `Port: ${escapeHtml(_pqcPort)}` : "",
-                            _pqcEnv ? `Environment: ${escapeHtml(_pqcEnv)}` : "",
-                        ].filter(Boolean).join(" &nbsp;·&nbsp; ");
+                    const _qsColor = _quantumStatus === "VULNERABLE" ? "#ef4444"
+                        : (_quantumStatus === "WEAK" ? "#f59e0b" : "#10b981");
+                    const _pqcExtras = [
+                        _caAlgo ? `CA Algorithm: ${escapeHtml(_caAlgo)}` : "",
+                        _keyAlgo ? `Key Algorithm: ${escapeHtml(_keyAlgo)}` : "",
+                        _protocolVer ? `Protocol: ${escapeHtml(_protocolVer)}` : "",
+                        _pqcPort ? `Port: ${escapeHtml(_pqcPort)}` : "",
+                        _pqcEnv ? `Environment: ${escapeHtml(_pqcEnv)}` : "",
+                    ].filter(Boolean).join(" &nbsp;·&nbsp; ");
 
-                        // Attack Vector badge — derived from exposure_context
-                        const _avBadge = _exposureCtx ? (() => {
-                            const isExt = _exposureCtx.toUpperCase() === "EXTERNAL";
-                            const isInt = _exposureCtx.toUpperCase() === "INTERNAL";
-                            const avColor   = isExt ? "#ef4444" : isInt ? "#f59e0b" : "#94a3b8";
-                            const avIcon    = isExt ? "🌐" : isInt ? "🏠" : "❓";
-                            const avLabel   = isExt ? "External (Internet-facing)"
-                                            : isInt ? "Internal (LAN / On-prem)" : _exposureCtx;
-                            const hndlLabel = isExt
-                                ? "Nation-state harvest-now-decrypt-later threat"
-                                : isInt
+                    // Attack Vector badge — derived from exposure_context
+                    const _avBadge = _exposureCtx ? (() => {
+                        const isExt = _exposureCtx.toUpperCase() === "EXTERNAL";
+                        const isInt = _exposureCtx.toUpperCase() === "INTERNAL";
+                        const avColor = isExt ? "#ef4444" : isInt ? "#f59e0b" : "#94a3b8";
+                        const avIcon = isExt ? "🌐" : isInt ? "🏠" : "❓";
+                        const avLabel = isExt ? "External (Internet-facing)"
+                            : isInt ? "Internal (LAN / On-prem)" : _exposureCtx;
+                        const hndlLabel = isExt
+                            ? "Nation-state harvest-now-decrypt-later threat"
+                            : isInt
                                 ? "Insider / compromised-host threat (network access required)"
                                 : "";
-                            return `<p style="margin:6px 0 0 0; font-size:0.78rem;">
+                        return `<p style="margin:6px 0 0 0; font-size:0.78rem;">
                                 <span style="font-weight:700; color:${avColor};">${avIcon} Attack Vector:</span>
                                 <span style="font-size:0.75rem; padding:2px 8px; border-radius:4px; background:${avColor}22; color:${avColor}; border:1px solid ${avColor}66; font-weight:700; margin-left:4px;">${escapeHtml(avLabel)}</span>
                                 ${hndlLabel ? `<span style="font-size:0.72rem; color:var(--text-muted); margin-left:6px;">${escapeHtml(hndlLabel)}</span>` : ""}
                             </p>`;
-                        })() : "";
+                    })() : "";
 
-                        // Risk band / business priority color convention mirrors the
-                        // Quantum Status badge above: CRITICAL=red, HIGH=orange,
-                        // MEDIUM=yellow/amber, LOW=green.
-                        const _bandColor = (band) => band === "CRITICAL" ? "#ef4444"
-                            : band === "HIGH" ? "#f97316"
+                    // Risk band / business priority color convention mirrors the
+                    // Quantum Status badge above: CRITICAL=red, HIGH=orange,
+                    // MEDIUM=yellow/amber, LOW=green.
+                    const _bandColor = (band) => band === "CRITICAL" ? "#ef4444"
+                        : band === "HIGH" ? "#f97316"
                             : band === "MEDIUM" ? "#f59e0b"
-                            : band === "LOW" ? "#10b981"
-                            : "#94a3b8";
-                        const _riskColor = _bandColor(_riskBand);
-                        const _bpColor = _bandColor(_businessPriority.toUpperCase());
-                        return `
+                                : band === "LOW" ? "#10b981"
+                                    : "#94a3b8";
+                    const _riskColor = _bandColor(_riskBand);
+                    const _bpColor = _bandColor(_businessPriority.toUpperCase());
+                    return `
                     <div class="finding-detail-row" style="border-left: 3px solid ${_qsColor}; padding-left: 10px; margin-bottom: 10px;">
                         <label style="font-weight:700; font-size:0.78rem; color:${_qsColor}; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">🔐 Quantum Readiness</label>
                         <span style="font-size:0.78rem; padding:3px 9px; border-radius:6px; background:${_qsColor}22; color:${_qsColor}; border:1px solid ${_qsColor}66; font-weight:800;">${escapeHtml(_quantumStatus)}</span>
@@ -4915,7 +4948,7 @@ function renderFindingsList() {
                         ${_oemProduct ? `<p style="margin:4px 0 0 0; font-size:0.78rem; color:var(--text-primary);"><span style="font-weight:700;">OEM Product / Readiness:</span> ${escapeHtml(_oemProduct)}${_oemReadiness ? `: ${escapeHtml(_oemReadiness)}` : ""}</p>` : ""}
                         ${_migrationDepFlag ? `<p style="margin:6px 0 0 0; font-size:0.78rem; color:#ef4444; font-weight:700;">⚠ Migration Dependency: downstream system also quantum-vulnerable</p>${_dependencyChain ? `<p style="margin:2px 0 0 0; font-size:0.76rem; color:var(--text-muted);">${escapeHtml(_dependencyChain)}</p>` : ""}` : ""}
                     </div>`;
-                    })() : ""}
+                })() : ""}
 
                     <div class="finding-detail-row" style="margin-bottom: 10px;">
                         <label style="font-weight:700; font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">🔴 CVE References (click to view on NVD)</label>
@@ -7588,6 +7621,11 @@ async function handleScopingExcelUpload(event) {
     try {
         const formData = new FormData();
         formData.append("file", file);
+        try {
+            const _fw = (typeof activeSessionFramework !== "undefined" && activeSessionFramework)
+                || (document.getElementById("framework-select") || {}).value || "";
+            if (_fw) formData.append("framework", _fw);
+        } catch (e) { /* optional */ }
 
         const res = await authFetch(`${API_BASE}/controls/parse-scope-excel`, { // BUG-07 FIX: was bare fetch() — no JWT sent, caused silent 401 + fallback to 5-control default
             method: "POST",

@@ -15,8 +15,8 @@ sys.path.append(os.getcwd())
 os.environ["RESOURCE_GUARD_CRITICAL_PERCENT"] = "2"
 os.environ["RESOURCE_GUARD_CRITICAL_FLOOR_GB"] = "0.2"
 os.environ["LLM_BACKEND"] = "llama.cpp"
-os.environ["OLLAMA_HOST"] = "http://127.0.0.1:11434"
-os.environ["EMBEDDING_HOST"] = "http://127.0.0.1:11435"
+os.environ.setdefault("OLLAMA_HOST", "http://127.0.0.1:11434")
+os.environ.setdefault("EMBEDDING_HOST", "http://127.0.0.1:11435")
 
 from src.core.parsers.doc_parsers import extract_text
 from src.core.excel_scoping_parser import parse_excel_scoping_checklist
@@ -38,6 +38,10 @@ for fname in files:
     if fname.endswith(".xlsx"):
         continue
     fpath = os.path.join(EVIDENCE_DIR, fname)
+    # The evidence folder contains a 'test_vapt samples' subdirectory; opening a
+    # directory as a file raises, so skip anything that is not a regular file.
+    if not os.path.isfile(fpath):
+        continue
     with open(fpath, "rb") as f:
         f_bytes = f.read()
     f_obj = io.BytesIO(f_bytes)

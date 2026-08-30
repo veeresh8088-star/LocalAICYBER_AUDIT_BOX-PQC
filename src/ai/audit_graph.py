@@ -5,6 +5,7 @@ Implements the LangGraph State Machine for auditing controls.
 Integrates custom validators and retrieval with LangChain ChatOllama.
 """
 
+import os
 import time as _time
 import threading
 from typing import TypedDict, List, Dict, Any, Optional
@@ -181,6 +182,79 @@ def retrieve_node(state: AuditState) -> Dict[str, Any]:
     return {"retrieved_context": condensed}
 
 
+# ── LLM timeout budget ───────────────────────────────────────────────────────
+# Two separate budgets, deliberately. They used to be one number covering both
+# the wait for a free worker slot and the request itself, so a long queue ate
+# the request's clock: a control that needed 15 minutes of compute, after 20
+# minutes of queueing, was killed at 30 having been given only 10. The request
+# now always gets its full budget no matter how long it waited.
+#
+# The floor was raised from 600s because it is measured from the moment the call
+# starts, using the session count at that instant. A request beginning while the
+# system was quiet received 10 minutes, and a burst of new audits arriving
+# immediately afterwards could slow it tenfold inside that unchanged budget.
+# 1800 costs nothing under load, where active_cnt * per-session already
+# dominates, and removes the only timeout that a correctly-sized machine still
+# produced. Both are env-overridable for an operator who has measured their own
+# hardware.
+LLM_TIMEOUT_FLOOR_SEC = int(os.environ.get("LLM_TIMEOUT_FLOOR_SEC", "1800"))
+LLM_TIMEOUT_PER_SESSION_SEC = int(os.environ.get("LLM_TIMEOUT_PER_SESSION_SEC", "360"))
+# Waiting for a worker slot is a queueing problem, not a compute one: if no slot
+# frees in this long, the system is saturated and failing fast is more useful
+# than holding the thread.
+LLM_POOL_WAIT_TIMEOUT_SEC = int(os.environ.get("LLM_POOL_WAIT_TIMEOUT_SEC", "300"))
+
+
+def _record_control_timeout(state, control_id: str, budget_sec: int, phase: str = "generation"):
+    """Records a control timeout everywhere it needs to be visible.
+
+    Three destinations, because each answers a different person's question:
+      - SystemEvent      : the admin log trail (what happened, when, which control)
+      - Redis error count: the live KPI dashboard, which previously read zero
+                           errors while controls were timing out -- the two views
+                           disagreed and the dashboard was the one people watched
+      - progress warning : the auditor's own screen. app.js already toasts this
+                           field, so no frontend change is needed; without it a
+                           timeout was invisible to the person running the audit.
+    """
+    session_id = state.get("bg_key", "") or ""
+    try:
+        from src.core.bg_worker import log_system_event
+        log_system_event(
+            "LLM_TIMEOUT", "WARNING",
+            f"{phase.capitalize()} timed out after {budget_sec}s for control '{control_id}' "
+            f"-- control marked NOT_EVALUATED.",
+            session_id=session_id,
+        )
+    except Exception:
+        pass
+    try:
+        from src.core import redis_metrics as _rm
+        _rm.push_error(session_id=session_id)
+    except Exception:
+        pass
+    if not session_id:
+        return
+    try:
+        from src.core.bg_state import _bg_store, _bg_lock
+        with _bg_lock:
+            _prev = _bg_store["progress"].get(session_id) or {}
+            if phase == "reflection":
+                _msg = (
+                    f"⚠️ Control {control_id}: the self-correction pass timed out after "
+                    f"{budget_sec // 60} minutes. The original assessment was kept."
+                )
+            else:
+                _msg = (
+                    f"⚠️ Control {control_id} could not be evaluated — the analysis engine "
+                    f"did not respond in {budget_sec // 60} minutes. It will be reported as "
+                    f"Not Evaluated."
+                )
+            _bg_store["progress"][session_id] = {**_prev, "warning": _msg}
+    except Exception:
+        pass
+
+
 def _calculate_adaptive_timeout() -> int:
     """
     Dynamically calculates the LLM execution timeout based on system load:
@@ -192,7 +266,7 @@ def _calculate_adaptive_timeout() -> int:
     from src.core.redis_metrics import get_running_session_count
     active_cnt = max(1, get_running_session_count())
 
-    return max(600, active_cnt * 180)
+    return max(LLM_TIMEOUT_FLOOR_SEC, active_cnt * LLM_TIMEOUT_PER_SESSION_SEC)
 
 
 def _accumulate_token_stats(state: AuditState, chain) -> Dict[str, int]:
@@ -306,23 +380,39 @@ def generate_node(state: AuditState) -> Dict[str, Any]:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         # ── Heartbeat: update progress every 15s so UI never shows stuck 0% ──
+        # The wrapper allows the slot wait ON TOP of the request budget, so a
+        # control that queued for a while still gets its full compute time --
+        # the wrapper must never be the thing that cuts a running request short.
+        _wall_budget = _timeout + LLM_POOL_WAIT_TIMEOUT_SEC
         _elapsed = 0
         _heartbeat_interval = 15
-        while t.is_alive() and _elapsed < _timeout:
+        while t.is_alive() and _elapsed < _wall_budget:
             t.join(timeout=_heartbeat_interval)
             _elapsed += _heartbeat_interval
             if t.is_alive():
                 # Slowly increment between 30%→70% to show LLM is still working
-                _hb_phase = min(0.3 + (_elapsed / _timeout) * 0.4, 0.69)
+                _hb_phase = min(0.3 + (_elapsed / _wall_budget) * 0.4, 0.69)
                 _update_progress(state, f"LLM analysing control... ({_elapsed}s)", _hb_phase)
         if t.is_alive():
-            print(f"[LANGGRAPH TIMEOUT] Generator timed out after {_timeout}s for control {state.get('control_id','')}. Skipping.", flush=True)
-            try:
-                from src.core.bg_worker import log_system_event
-                log_system_event("LLM_TIMEOUT", "WARNING", f"Generator timed out after {_timeout}s for control '{state.get('control_id','')}'", session_id=state.get("bg_key", ""))
-            except Exception:
-                pass
-            return {"draft_finding": None, "validation_error": f"LLM call timed out after {_timeout}s"}
+            _ctrl = state.get('control_id', '')
+            print(f"[LANGGRAPH TIMEOUT] Generator timed out after {_wall_budget}s for control {_ctrl}. Not evaluated.", flush=True)
+            _record_control_timeout(state, _ctrl, _wall_budget, phase="generation")
+            # NOT_EVALUATED, never a fabricated verdict. This previously fell
+            # through to the same failure path as a validation error, which ends
+            # in a NON_COMPLIANT/PARTIAL finding -- publishing a compliance
+            # judgement for a control the model never actually assessed. An
+            # audit may report that it could not evaluate something; it must not
+            # invent the answer.
+            return {
+                "draft_finding": None,
+                "validation_error": f"LLM call timed out after {_wall_budget}s",
+                "not_evaluated": True,
+                "not_evaluated_reason": (
+                    f"Control was not evaluated: the analysis engine did not respond within "
+                    f"{_wall_budget // 60} minutes. Re-run this control; if it recurs, the "
+                    f"server is under-provisioned for the number of concurrent auditors."
+                ),
+            }
         # ─────────────────────────────────────────────────────────────────────
         if "error" in result_holder:
             raise Exception(result_holder["error"])
@@ -392,7 +482,18 @@ def validate_node(state: AuditState) -> Dict[str, Any]:
                 review_note = "Evaluated with control-specific governance synthesis."
 
             fallback = {
-                "status": "NON_COMPLIANT" if _is_timeout else ("PARTIAL" if has_retrieved else "NON_COMPLIANT"),
+                # A timeout is NOT_EVALUATED, not NON_COMPLIANT. The prose in this
+                # branch already said the control "was NOT evaluated", but the status
+                # field -- which is what drives the dashboard counts, the severity
+                # calculation, the exports and the customer's compliance percentage --
+                # still asserted NON_COMPLIANT. That publishes a compliance judgement
+                # for a control nothing ever assessed, and it is indistinguishable in
+                # every downstream view from a genuine failure.
+                "status": "NOT_EVALUATED" if _is_timeout else ("PARTIAL" if has_retrieved else "NON_COMPLIANT"),
+                "final_result": "NOT_EVALUATED" if _is_timeout else None,
+                # No risk rating can be derived from an evaluation that did not happen.
+                "severity": "N/A" if _is_timeout else None,
+                "risk_level": "UNDETERMINED" if _is_timeout else None,
                 "policy_present": "Not Found" if _is_timeout else ("Found" if has_retrieved else "Not Found"),
                 "evidence_present": "Not Found" if _is_timeout else ("Found" if has_retrieved else "Not Found"),
                 "hallucination_check": "SYSTEM_TIMEOUT" if _is_timeout else "FAIL_FALLBACK",
@@ -449,6 +550,13 @@ def validate_node(state: AuditState) -> Dict[str, Any]:
     # Enforce original validator checks (from validator.py)
     draft_copy = dict(draft)
     draft_copy["control_id"] = state["control_id"]
+    # Carry the Excel scoping through to the validator. post_process() needs to know
+    # the auditor locked this control to specific file(s), so its clause-5/6/7
+    # "needs a documented policy" default doesn't overrule a checklist that
+    # deliberately scoped the control to operational evidence alone.
+    draft_copy["locked_filenames"] = state.get("locked_filenames") or []
+    draft_copy["policy_locked_filenames"] = state.get("policy_locked_filenames") or []
+    draft_copy["evidence_locked_filenames"] = state.get("evidence_locked_filenames") or []
     
     validated_finding = post_process(
         finding=draft_copy,
@@ -577,19 +685,21 @@ def reflection_node(state: AuditState) -> Dict[str, Any]:
         # ── Heartbeat: keep progress moving between 85%→95% during reflection ──
         _ref_elapsed = 0
         _ref_hb = 15
-        while t.is_alive() and _ref_elapsed < _ref_timeout:
+        # Same wrapper rule as generation: the slot wait is allowed on top of the
+        # request budget so queueing cannot cut a running reflection short.
+        _ref_wall = _ref_timeout + LLM_POOL_WAIT_TIMEOUT_SEC
+        while t.is_alive() and _ref_elapsed < _ref_wall:
             t.join(timeout=_ref_hb)
             _ref_elapsed += _ref_hb
             if t.is_alive():
-                _hb_ref_phase = min(0.85 + (_ref_elapsed / _ref_timeout) * 0.1, 0.94)
+                _hb_ref_phase = min(0.85 + (_ref_elapsed / _ref_wall) * 0.1, 0.94)
                 _update_progress(state, f"Self-correcting finding... ({_ref_elapsed}s)", _hb_ref_phase)
         if t.is_alive():
-            print(f"[LANGGRAPH TIMEOUT] Reflection timed out after {_ref_timeout}s for control {state.get('control_id','')}. Accepting draft as-is.", flush=True)
-            try:
-                from src.core.bg_worker import log_system_event
-                log_system_event("LLM_TIMEOUT", "WARNING", f"Reflection timed out after {_ref_timeout}s for control '{state.get('control_id','')}'", session_id=state.get("bg_key", ""))
-            except Exception:
-                pass
+            # Unlike a generation timeout, this is NOT reported as NOT_EVALUATED:
+            # generation already produced a real assessment and only the optional
+            # refinement pass was lost, so the draft is a genuine finding.
+            print(f"[LANGGRAPH TIMEOUT] Reflection timed out after {_ref_wall}s for control {state.get('control_id','')}. Accepting draft as-is.", flush=True)
+            _record_control_timeout(state, state.get('control_id', ''), _ref_wall, phase="reflection")
             return {
                 "draft_finding": draft,
                 "validation_error": None,

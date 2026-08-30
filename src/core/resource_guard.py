@@ -28,7 +28,17 @@ except ImportError:
 # These must stay in sync with the -np auto-detection formula in llm_client.py:
 # model_gb=4.0, slot_gb=0.5 — if you change one, change both.
 FIXED_OVERHEAD_GB = float(os.environ.get("RESOURCE_GUARD_FIXED_OVERHEAD_GB", "4.5"))  # model(4GB) + OS/Postgres/Redis(0.5GB)
-PER_SLOT_GB = float(os.environ.get("RESOURCE_GUARD_PER_SLOT_GB", "0.5"))             # KV-cache per slot at -c 32768
+# Per-slot KV cost is DERIVED from the context each slot is given, not a flat
+# figure. It used to be a hardcoded 0.5GB "per slot at -c 32768" -- correct only
+# while the context stayed at that exact value. Raising the context with a flat
+# constant would let this over-provision slots and OOM the box, so the same
+# inputs docker/llm-entrypoint.sh uses are mirrored here (keep the two in sync).
+# An explicit RESOURCE_GUARD_PER_SLOT_GB still wins, for hand-tuning.
+MIN_CTX_PER_REQUEST = int(os.environ.get("MIN_CTX_PER_REQUEST", "16384"))
+KV_GB_PER_1K_FP16 = float(os.environ.get("KV_GB_PER_1K_FP16", "0.12"))
+_KV_BYTES_SCALE = 0.5 if os.environ.get("KV_QUANT", "1") == "1" else 1.0
+_DERIVED_PER_SLOT_GB = (MIN_CTX_PER_REQUEST / 1024.0) * KV_GB_PER_1K_FP16 * _KV_BYTES_SCALE
+PER_SLOT_GB = float(os.environ.get("RESOURCE_GUARD_PER_SLOT_GB", _DERIVED_PER_SLOT_GB))
 SAFETY_MARGIN = float(os.environ.get("RESOURCE_GUARD_SAFETY_MARGIN", "0.85"))
 MIN_SLOTS = 1
 

@@ -15,6 +15,116 @@ except ImportError:
 from .finding_schema import Finding
 from .control_mapper import map_findings_list
 
+# Phrases that mean the surrounding sentence is NOT reporting a live vulnerability:
+# it is remediation advice, a recommendation, or a statement that the issue is closed.
+# The PoC regex matches on a vulnerability NAME, which appears just as often in
+# "SQL injection prevention should be in place" as in an actual finding.
+_POC_NON_FINDING_PHRASES = (
+    "are fixed", "is fixed", "was fixed", "has been fixed", "have been fixed",
+    "resolved", "mitigated", "remediated", "patched", "no longer",
+    "should be", "must be", "recommend", "prevention", "prevented",
+    "best practice", "guideline", "not found", "not observed", "not identified",
+    "no instances", "none found", "protect against", "to prevent",
+)
+
+
+def _is_non_finding_poc(text: str) -> bool:
+    """True when a PoC keyword hit is advice or a closure note rather than a finding.
+
+    Confirmed on two real pentest reports: the regex matched inside
+    "SQL injection( All Application exposed API's are fixed) and" and
+    "SQL injection prevention should be in place, Session management and ident...",
+    and both were emitted as HIGH severity findings. A tool that invents HIGH
+    vulnerabilities out of sentences saying they were fixed is worse than one that
+    reports nothing -- and the caller already warns when a parser claims a file but
+    extracts zero findings, which is the honest outcome here.
+    """
+    low = (text or "").lower()
+    return any(p in low for p in _POC_NON_FINDING_PHRASES)
+
+
+_PDF_ARTIFACT_PATTERNS = (
+    # Browser print header/footer: the source document's own file:// URL. Leaks the
+    # exporting machine's directory structure straight into the customer's report --
+    # observed as "file:///C:/Users/<name>/Desktop/.../portswigger_sample.html" inside
+    # a delivered finding's description.
+    re.compile(r'file:///\S+', re.IGNORECASE),
+    # Print pagination stamped beside that URL ("24/62"). Bounded to 1-3 digits each
+    # side so real ratios in scanner output (e.g. a 1024/2048 key size) are untouched.
+    re.compile(r'(?<!\d)\d{1,3}\s*/\s*\d{1,3}(?=\s|$)'),
+    # about:blank appears in some headless-Chrome exports in place of the file URL.
+    re.compile(r'\babout:blank\b', re.IGNORECASE),
+)
+
+
+# Section terminators for the flat-text (PDF) path. Deliberately newline-free:
+# printed-to-PDF text has no reliable line breaks, so anchoring on "\nIssue
+# background" made every terminator unmatchable. Each alternative below is a
+# marker that genuinely ends an issue-detail section in a Burp export:
+#   Issue background / remediation / References / Vulnerability classifications
+#       -- the sibling sections Burp emits after the detail
+#   Request N / Response N   -- the raw HTTP capture that follows the prose
+#   <digits>. <Capital>      -- the next numbered finding's heading
+_SECTION_END = (
+    r'(?=Issue\s+(?:background|remediation)'
+    r'|References\b'
+    r'|Vulnerability\s+classifications'
+    r'|(?:HTTP\s+)?Request\s+\d'
+    r'|(?:HTTP\s+)?Response\s+\d'
+    r'|\d{1,3}\.\s+[A-Z]'
+    r'|$)'
+)
+_ISSUE_DETAIL_RE = r'Issue detail[s]?\s*[:\n]?\s*(.*?)' + _SECTION_END
+_ISSUE_BACKGROUND_RE = r'Issue background\s*[:\n]?\s*(.*?)' + _SECTION_END
+
+# Hard ceiling on a description, as a backstop for export shapes not seen here.
+_MAX_DESC_CHARS = 1500
+
+
+def _scrub_pdf_artifacts(text: str) -> str:
+    """Removes browser print-to-PDF header/footer noise from extracted text.
+
+    A Burp HTML report printed to PDF carries the print chrome into its text layer:
+    the source file:// URL and the page counter. Those land inside finding
+    descriptions verbatim, so this runs before any parsing rather than after --
+    once the text is sliced into findings the artifacts are already embedded.
+    """
+    if not text:
+        return text
+    for pat in _PDF_ARTIFACT_PATTERNS:
+        text = pat.sub(' ', text)
+    return text
+
+
+def _clean_poc_title(raw: str) -> str:
+    """Trim a screenshot/PoC title down to the vulnerability name.
+
+    The PoC regex grabs up to 60 characters after its keyword, which is fine for a
+    prose report but not for a .docx: doc_parsers flattens table rows into
+    "cell | cell | cell", so the run swallows the neighbouring severity and status
+    columns and the 60-char cap then cuts mid-word. Real titles produced from the
+    WAVE and Sample pentest reports:
+
+        "Visual PoC: XSS vulnerability | High | No."
+        "Visual PoC: Cross-site scripting (DOM-based) [WCSR] | Low "
+        "Visual PoC: SQL injection( All Application exposed API's a"
+
+    Those go into the customer's report verbatim. Cut at the column separator, drop
+    a bracket the cap left unclosed, and drop a trailing partial word.
+    """
+    if not raw:
+        return ""
+    t = str(raw).split("|")[0]                      # table separator ends the title
+    t = re.sub(r'\s+', ' ', t).strip()
+    if t.count("(") > t.count(")"):                 # "SQL injection( All Application..."
+        t = t[:t.rindex("(")].strip()
+    if t.count("[") > t.count("]"):
+        t = t[:t.rindex("[")].strip()
+    t = re.sub(r',\s*\w{1,2}$', '', t)              # "...in place, S" -> "...in place"
+    t = re.sub(r'[\s,;:\-]+$', '', t)
+    return t.strip()
+
+
 class BurpParser(BaseParser):
     def can_parse(self, filename: str, content: str) -> bool:
         """Content-signature based detection — 0% filename keyword dependency.
@@ -50,6 +160,11 @@ class BurpParser(BaseParser):
     def parse(self, filename: str, content: str) -> Tuple[List[Finding], List[Finding]]:
         if not content:
             return [], []
+
+        # Strip print-to-PDF chrome before anything slices the text into findings.
+        # Harmless for XML/HTML input (the patterns don't occur there), required for
+        # the text path, where these artifacts otherwise end up inside descriptions.
+        content = _scrub_pdf_artifacts(content)
 
         # Check if content is XML format
         if content.strip().startswith("<?xml") or "<issues" in content[:2000]:
@@ -377,7 +492,15 @@ class BurpParser(BaseParser):
         # ── 1. Build category map for numbered hierarchies ───────────────────────
         # e.g., '1' -> 'SQL injection', '2' -> 'XML external entity injection'
         cat_map = {}
-        for m in re.finditer(r'(?:^|\n)\s*(?P<num>\d+)\.\s+(?P<title>[A-Za-z0-9_\-\s\(\)]+)', content):
+        # The title class previously omitted "/", so a title was silently cut at the
+        # first slash: "2. SSL/TLS CBC Cipher Suites Enabled (Lucky13)" in a real
+        # Nessus text export became the finding title "SSL" -- three characters,
+        # published as-is into the customer's VAPT report. Slashes, dots, commas,
+        # apostrophes, ampersands, plus signs and brackets all occur in real scanner
+        # titles ("SSL/TLS", "TLS v1.2", "Cross-Site Scripting [DOM-based]").
+        # Newlines stay excluded via the split('\n')[0] below, which already trims
+        # the capture to its first line.
+        for m in re.finditer(r'(?:^|\n)\s*(?P<num>\d+)\.\s+(?P<title>[A-Za-z0-9_\-\s\(\)/.,\'&+\[\]]+)', content):
             n = m.group('num')
             t = m.group('title').strip()
             if len(t) > 2 and not t.lower().startswith(('http', 'page', 'summary')):
@@ -456,20 +579,37 @@ class BurpParser(BaseParser):
                 elif score >= 4.0: severity = "MEDIUM"
                 elif score > 0.0: severity = "LOW"
 
-                # Extract Issue detail section
+                # Extract Issue detail section.
+                #
+                # Every terminator here used to require a leading newline ("\nIssue
+                # background", "\nReferences"). PDF text extraction does not preserve
+                # the source document's line breaks, so on a printed-to-PDF Burp report
+                # none of them could ever match -- and with DOTALL the lazy group then
+                # ran to the end of body_text, which spans up to the NEXT severity
+                # marker. A single description absorbed the raw HTTP request, the full
+                # response headers, the Collaborator interaction dump and the heading
+                # of the following finding. Confirmed on a delivered customer report.
+                #
+                # The newline requirement is dropped and the request/response and
+                # next-numbered-heading markers are added, so the section ends where it
+                # actually ends in both line-preserved and flattened text.
                 desc = ""
                 m_desc = re.search(
-                    r'Issue detail[s]?\s*\n(.*?)(?=\nIssue\s+(?:background|remediation)|\nReferences|\nVulnerability|$)',
-                    body_text, re.DOTALL | re.IGNORECASE
+                    _ISSUE_DETAIL_RE, body_text, re.DOTALL | re.IGNORECASE
                 )
                 if m_desc:
                     desc = m_desc.group(1).strip()
                 if not desc:
                     m_bg = re.search(
-                        r'Issue background\s*\n(.*?)(?=\nIssue\s+remediation|\nReferences|\nVulnerability|$)',
-                        body_text, re.DOTALL | re.IGNORECASE
+                        _ISSUE_BACKGROUND_RE, body_text, re.DOTALL | re.IGNORECASE
                     )
                     desc = m_bg.group(1).strip() if m_bg else body_text[:500]
+                # Backstop: if every terminator still misses on some unseen export
+                # shape, degrade to a truncated description rather than emitting the
+                # whole block. A description is a summary field; nothing legitimate
+                # needs 20KB of it.
+                if len(desc) > _MAX_DESC_CHARS:
+                    desc = desc[:_MAX_DESC_CHARS].rstrip() + " […]"
 
                 # Extract Remediation
                 remed = ""
@@ -515,7 +655,16 @@ class BurpParser(BaseParser):
             # Fallback for OCR / PoC Screenshot text (e.g. shot_burp_sqli.png, shot_burp_xss.png)
             poc_hits = list(re.finditer(r'(?:Vulnerability\s*Proof|Proof\s*of\s*Concept|SQL\s*Injection|Stored\s*XSS|Reflected\s*XSS|Cross-Site\s*Scripting|XSS)[A-Z]*[^\n\r<]{0,60}', content, re.IGNORECASE))
             for ph in poc_hits:
-                match_str = ph.group(0).strip()
+                if _is_non_finding_poc(ph.group(0)):
+                    print(
+                        f"[VAPT PARSER] Skipped PoC match -- reads as remediation/advice, "
+                        f"not a live finding: {ph.group(0).strip()[:80]!r}",
+                        flush=True
+                    )
+                    continue
+                match_str = _clean_poc_title(ph.group(0))
+                if not match_str:
+                    continue
                 f_poc = Finding(
                     title=f"Visual PoC: {match_str}",
                     severity="HIGH",
