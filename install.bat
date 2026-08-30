@@ -67,7 +67,11 @@ if errorlevel 1 (
 echo.
 echo --^> Waiting for the application to answer ^(up to 5 minutes^)
 for /L %%N in (1,1,100) do (
-  curl -s -o nul -w "%%{http_code}" http://localhost:8000/ 2>nul | findstr /C:"200" >nul 2>&1
+  REM -f makes curl exit non-zero on any HTTP error, so a zero exit IS the
+  REM readiness signal. Piping %%{http_code} into findstr was fragile: it
+  REM matched "200" anywhere in the output, and curl's own failures left
+  REM partial text behind.
+  curl -fs --max-time 5 http://localhost:8000/ >nul 2>&1
   if !errorlevel! equ 0 (
     echo.
     echo ===========================================================
@@ -79,7 +83,7 @@ for /L %%N in (1,1,100) do (
     echo.
     echo The last line must read "= 32768 tokens per request". A lower number
     echo means the machine has less RAM than the LLM expected, and evidence
-    echo would be truncated before the model sees it -- see INSTALL_%VERSION%.md.
+    echo would be truncated before the model sees it -- see INSTALL_v%VERSION%.md.
     exit /b 0
   )
   timeout /t 3 /nobreak >nul

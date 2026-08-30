@@ -230,9 +230,12 @@ def main():
               f"(a full app image would be ~2100 MB)")
         print("")
         print("  The customer drops it in their install folder and runs:")
-        print(f"    tar -xzf AICyberAuditBox-{version}-patch.tar.gz")
-        print(f"    cp -r AICyberAuditBox-{version}-patch/* .   "
-              f"(Windows: xcopy /E /Y AICyberAuditBox-{version}-patch .)")
+        # --strip-components=1 unpacks straight into the install folder rather
+        # than creating a nested copy to move afterwards. That removes a step,
+        # and removes ~30 characters from every path -- which matters on Windows,
+        # where a deep install directory can push the extracted files past the
+        # 260-character MAX_PATH limit and the copy fails halfway through.
+        print(f"    tar -xzf AICyberAuditBox-{version}-patch.tar.gz --strip-components=1")
         print("    ./apply_patch.sh        (Windows: apply_patch.bat)")
         print("")
         print(f"  Requires aicyberauditbox-app:{args.patch} already installed.")

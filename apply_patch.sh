@@ -55,8 +55,12 @@ echo ""
 echo "--> Waiting for it to answer"
 i=0
 while [ $i -lt 60 ]; do
-  code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ 2>/dev/null || echo 000)
-  if [ "$code" = "200" ]; then
+  # -f makes curl exit non-zero on any HTTP error, so a zero exit IS the
+  # readiness signal. Parsing %{http_code} was fragile: when curl failed for an
+  # unrelated reason it had already printed a partial code, and the "|| echo 000"
+  # fallback appended to it -- yielding a value that could never match, so a
+  # perfectly working app reported as a failed install.
+  if curl -fs --max-time 5 http://localhost:8000/ >/dev/null 2>&1; then
     echo ""
     echo "==========================================================="
     echo "  Patched to ${TO_VERSION}.  http://localhost:8000/"

@@ -63,7 +63,11 @@ if errorlevel 1 (
 echo.
 echo --^> Waiting for it to answer
 for /L %%N in (1,1,60) do (
-  curl -s -o nul -w "%%{http_code}" http://localhost:8000/ 2>nul | findstr /C:"200" >nul 2>&1
+  REM -f makes curl exit non-zero on any HTTP error, so a zero exit IS the
+  REM readiness signal. Piping %%{http_code} into findstr was fragile: it
+  REM matched "200" anywhere in the output, and curl's own failures left
+  REM partial text behind.
+  curl -fs --max-time 5 http://localhost:8000/ >nul 2>&1
   if !errorlevel! equ 0 (
     echo.
     echo ===========================================================

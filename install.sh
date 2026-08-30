@@ -54,8 +54,12 @@ echo ""
 echo "--> Waiting for the application to answer (up to 5 minutes)"
 i=0
 while [ $i -lt 100 ]; do
-  code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ 2>/dev/null || echo 000)
-  if [ "$code" = "200" ]; then
+  # -f makes curl exit non-zero on any HTTP error, so a zero exit IS the
+  # readiness signal. Parsing %{http_code} was fragile: when curl failed for an
+  # unrelated reason it had already printed a partial code, and the "|| echo 000"
+  # fallback appended to it -- yielding a value that could never match, so a
+  # perfectly working app reported as a failed install.
+  if curl -fs --max-time 5 http://localhost:8000/ >/dev/null 2>&1; then
     echo ""
     echo "==========================================================="
     echo "  Ready.  Open http://localhost:8000/"
@@ -66,7 +70,7 @@ while [ $i -lt 100 ]; do
     echo ""
     echo "The last line must read '= 32768 tokens per request'. A lower number"
     echo "means the machine has less RAM than the LLM expected, and evidence"
-    echo "would be truncated before the model sees it -- see INSTALL_${VERSION}.md."
+    echo "would be truncated before the model sees it -- see INSTALL_v${VERSION}.md."
     exit 0
   fi
   i=$((i + 1))
