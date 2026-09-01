@@ -245,6 +245,9 @@ def get_reranker(mode="quick"):
     Toggles loaded models dynamically to prevent excessive RAM usage.
     """
     global _RERANKER_MODEL, _RERANKER_ACTIVE_MODE
+
+    if str(mode or "").strip().lower() in ("none", "off", "disabled", "false"):
+        return None
     
     # Map friendly modes to Hugging Face models
     model_name = "cross-encoder/ms-marco-MiniLM-L-6-v2" if mode == "quick" else "BAAI/bge-reranker-base"
@@ -287,7 +290,9 @@ DEFAULT_TOP_K = {
 POLICY_SIGNAL_TERMS = [
     "policy", "procedure", "standard", "shall", "must", "should", "approved",
     "documented", "requirement", "guideline", "framework", "governance",
-    "mandate", "revision", "version"
+    "mandate", "revision", "version", "effective date", "review cycle",
+    "document owner", "approved by", "document title", "policy status",
+    "effective", "annual review", "sign-off", "approver", "implementation"
 ]
 EVIDENCE_SIGNAL_TERMS = [
     "log", "report", "screenshot", "evidence", "completed", "executed",
@@ -955,11 +960,30 @@ def _retrieve_rag_context(
             for t in chunk_texts:
                 t_lower = t.lower()
                 score = 0
-                for kw, weight in batch_keywords.items():
-                    count = len(re.findall(r'\b' + re.escape(kw) + r'\b', t_lower))
-                    if count > 0:
-                        score += count * weight
                 combined_scores.append(score)
+
+        # ── Governance Proof Chunk Reranking Boost ──────────────────────────
+        # Prioritize chunks containing formal policy metadata (version, effective date,
+        # approval, document owner) over generic educational definition paragraphs.
+        GOVERNANCE_PROOF_TERMS = [
+            "effective date", "version", "approved by", "document owner",
+            "review cycle", "revision history", "effective", "annual review",
+            "implementation", "status: active", "status: approved", "policy statement"
+        ]
+        DEFINITION_INTRO_TERMS = [
+            "is defined as", "refers to", "what is ", "definition of",
+            "background and introduction", "general overview", "purpose of this document is to define"
+        ]
+
+        if combined_scores and chunk_texts:
+            boosted_scores = []
+            for score, t in zip(combined_scores, chunk_texts):
+                t_low = t.lower()
+                gov_matches = sum(1 for term in GOVERNANCE_PROOF_TERMS if term in t_low)
+                intro_matches = sum(1 for term in DEFINITION_INTRO_TERMS if term in t_low)
+                
+                score_mult = 1.0 + (gov_matches * 0.15) - (intro_matches * 0.10)
+            combined_scores = boosted_scores
 
     scored_chunks = []
     if db_chunks:

@@ -153,13 +153,30 @@ def _ensure_llama_server_running(port=11434):
             print(f"[AUTO-START LLM] RAM detection unavailable -> using -np {_np} parallel slots (fallback)", flush=True)
 
         if port == 11434:
-            model_path = os.path.join(base_dir, "google_gemma-4-E4B-it-Q4_K_M.gguf")
-            # 128k fluid shared token pool, 8-bit KV-cache compression (halves RAM vs FP16),
-            # flash attention, and continuous batching — matches run_all.bat/sh exactly.
+            candidates = [
+                "gemma-4-12B-it-Q8_0.gguf",
+                "gemma-4-12b-it-Q8_0.gguf",
+                "gemma-4-12B-it-Q4_K_M.gguf",
+                "gemma-2-9b-it-Q8_0.gguf",
+                "google_gemma-4-E4B-it-Q4_K_M.gguf"
+            ]
+            model_path = None
+            for cand in candidates:
+                cand_path = os.path.join(base_dir, cand)
+                if os.path.exists(cand_path):
+                    model_path = cand_path
+                    break
+            if not model_path:
+                model_path = os.path.join(base_dir, "google_gemma-4-E4B-it-Q4_K_M.gguf")
+            
+            is_12b = "12b" in os.path.basename(model_path).lower()
+            ctx_size = "262144" if is_12b else "131072"
+            
+            print(f"[AUTO-START LLM] Auto-selected model: {os.path.basename(model_path)} ({os.path.getsize(model_path) / (1024**3):.2f} GB) with {int(ctx_size)//1024}K Context Window", flush=True)
             cmd = [
                 llama_exe, "--port", "11434",
                 "-m", model_path,
-                "-c", "131072",
+                "-c", ctx_size,
                 "-np", str(_np),
                 "-t", _cpu_threads,
                 "-b", "2048",

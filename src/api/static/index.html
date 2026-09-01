@@ -228,7 +228,8 @@
                 <div class="form-group" style="margin: 0;">
                     <select id="llm-model-select"
                         style="width: 100%; padding: 8px 12px; font-size: 0.82rem; border-radius: 8px;">
-                        <option value="Gemma 4 (e4b)">Gemma 4 (e4b) - Recommended</option>
+                        <option value="Gemma 4 (12b)" selected>Gemma 4 (12B) - Champion (11.8 GB)</option>
+                        <option value="Gemma 4 (e4b)">Gemma 4 (e4b) - Standard</option>
                         <option value="Gemma 4 (2b)">Gemma 4 (2b) - Fast</option>
                     </select>
                 </div>
@@ -242,10 +243,8 @@
                 <div class="segmented-control" style="display: flex; gap: 4px; padding: 4px; border-radius: 10px;">
                     <button type="button" class="segmented-btn" id="btn-mode-fast-parser"
                         onclick="setAnalysisMode('Technical findings only')"
-                        title="Instant deterministic rule-based parser: Nessus, Burp Suite, Nmap, Qualys, Trivy, PQC configs, PDF/DOCX/images. Zero LLM compute. 100% accurate, <1 second."
-                        style="flex: 1; padding: 6px; font-size: 0.76rem; border-radius: 8px; border: none; outline: none; cursor: pointer; color: #94a3b8; background: transparent; font-weight: 500;">&#9889;
-                        Fast
-                        Parser</button>
+                        title="Scanner mode: Parses Nessus, Burp Suite, Nmap, Qualys, Trivy, PQC configs, PDF/DOCX/images using Python Parsers + LLM Engine."
+                        style="flex: 1; padding: 6px; font-size: 0.76rem; border-radius: 8px; border: none; outline: none; cursor: pointer; color: #94a3b8; background: transparent; font-weight: 500;">Scanner</button>
                     <button type="button" class="segmented-btn" id="btn-mode-quick" onclick="setAnalysisMode('Quick')"
                         style="flex: 1; padding: 6px; font-size: 0.76rem; border-radius: 8px; border: none; outline: none; cursor: pointer; color: #94a3b8; background: transparent; font-weight: 500;">Quick
                         Audit</button>
@@ -253,20 +252,6 @@
                         onclick="setAnalysisMode('Deep')"
                         style="flex: 1; padding: 6px; font-size: 0.76rem; border-radius: 8px; border: none; outline: none; cursor: pointer; color: #ffffff; background: #2563eb; font-weight: 700; box-shadow: 0 2px 6px rgba(37,99,235,0.4);">Deep
                         Audit</button>
-                </div>
-                <small id="mode-helper-text"
-                    style="color:var(--text-muted); display:block; margin-top:6px; line-height:1.4;">
-                    <b>&#9889; Fast Parser</b>: Instant scan of Nessus/Burp/Nmap/PQC config files &amp; images — zero AI
-                    compute, 100% exact findings.
-                    <b>Quick/Deep Audit</b>: AI-based evidence evaluation for policy documents &amp; governance
-                    frameworks.
-                </small>
-                <!-- Governance lock notice (shown only when ISO/SOC/DPDP/BCMS/XBOM is selected) -->
-                <div id="mode-governance-notice"
-                    style="display:none; margin-top:7px; padding:7px 10px; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35); border-radius:8px; font-size:0.75rem; color:#b45309; line-height:1.4;">
-                    &#128274; <b>Fast Parser is not available</b> for governance frameworks (ISO 27001 / SOC 2 / DPDP /
-                    BCMS / X-BOM). AI reasoning is required to evaluate policy documents and evidence. Mode locked to
-                    <b>Deep Audit</b>.
                 </div>
             </div>
 
@@ -404,18 +389,19 @@
                 </div>
             </div>
 
-            <button class="logout-btn" onclick="logout()"
-                style="margin-top: 16px; width: 100%; border-radius: 10px; padding: 10px; color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.08); font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;">
-                <span>Logout Session</span>
-            </button>
         </aside>
+
+        <!-- Sidebar Resizer Drag Handle -->
+        <div id="sidebar-resizer" class="sidebar-resizer-handle" title="Drag to resize sidebar width">
+            <div class="resizer-grip-icon"></div>
+        </div>
 
         <!-- Main Workspace Area -->
         <main class="workspace">
             <header class="workspace-header">
                 <div>
                     <h2 id="workspace-title">Audit Records Workspace</h2>
-                    <span id="active-session-badge">Session: No active session</span>
+                    <span id="active-session-badge" style="display: none !important;"></span>
                 </div>
                 <div class="header-right" style="display: flex; align-items: center; gap: 12px;">
                     <button id="license-widget-btn" onclick="openLicenseModal()" class="btn-secondary"
@@ -427,6 +413,11 @@
                         style="padding: 5px 12px; font-size: 0.78rem; display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); cursor: pointer; border-radius: 8px;"
                         title="Switch between Dark and Light mode">
                         <span id="theme-toggle-text">Dark Mode</span>
+                    </button>
+                    <button class="logout-btn" onclick="logout()" class="btn-secondary"
+                        style="padding: 5px 12px; font-size: 0.78rem; border-radius: 8px; color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); font-weight: 700; cursor: pointer; display: flex; align-items: center; gap: 6px;"
+                        title="Logout Session">
+                        <span>Logout Session</span>
                     </button>
                     <span id="current-time-label">24 Jul 2026</span>
                 </div>
@@ -674,15 +665,15 @@
                                         </button>
                                     </div>
 
-                                    <!-- Segmented 3-Option Switch -->
+                                    <!-- Segmented Option Switch -->
                                     <div
                                         style="display: flex; gap: 4px; background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border-color); padding: 4px; border-radius: 10px; margin-bottom: 6px;">
-                                        <button type="button" class="scope-mode-btn active-scope-mode"
-                                            id="btn-ai-scoping" onclick="setScopingMode('AI')"
-                                            style="flex: 1; padding: 7px 6px; font-size: 0.75rem; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
+                                        <button type="button" class="scope-mode-btn" id="btn-ai-scoping"
+                                            onclick="setScopingMode('AI')"
+                                            style="flex: 1; padding: 7px 6px; font-size: 0.75rem; border-radius: 8px; border: none; cursor: pointer; display: none; align-items: center; justify-content: center; gap: 4px;">
                                             <span>AI Auto-Scoping</span>
                                         </button>
-                                        <button type="button" class="scope-mode-btn" id="btn-excel-scoping"
+                                        <button type="button" class="scope-mode-btn active-scope-mode" id="btn-excel-scoping"
                                             onclick="setScopingMode('EXCEL')"
                                             style="flex: 1; padding: 7px 6px; font-size: 0.75rem; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px;">
                                             <span>Excel Upload</span>
@@ -697,9 +688,7 @@
                                     <!-- Live Context Status Note -->
                                     <div id="scoping-mode-status-note"
                                         style="font-size: 0.72rem; color: var(--text-muted); padding: 0 2px;">
-                                        <span style="color:#10b981;font-weight:700;">Active:</span> <b>AI
-                                            Auto-Scoping</b> — Automatically detecting applicable controls from evidence
-                                        files.
+                                        <span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>Excel Upload Scope</b> — Drag & drop or browse an Excel scoping matrix (.xlsx) below.
                                     </div>
                                 </div>
 
@@ -756,7 +745,7 @@
                                 <button id="run-analysis-btn" class="btn-primary pulse-glowing-btn"
                                     onclick="triggerAuditAnalysis()"
                                     style="width: 100%; padding: 12px; font-size: 0.98rem; font-weight: 800; letter-spacing: 0.5px; border-radius: 10px; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4); display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer;">
-                                    <span>▶</span> <span>RUN AUDIT SCAN</span>
+                                    <span>▶</span> <span>Run Audit Scan</span>
                                 </button>
                                 <button id="stop-analysis-btn" class="btn-danger" onclick="stopAuditAnalysis()"
                                     style="display:none; width: 100%; padding: 12px; font-size: 0.95rem; font-weight: 800; border-radius: 10px; margin-top: 8px;">STOP
@@ -1340,8 +1329,7 @@
             </form>
         </div>
     </div>
-
-    <!-- ── FLOATING AI COPILOT WIDGET (GEMINI STYLE) ── -->
+    <!-- ── FLOATING AI COPILOT WIDGET (BOTTOM LEFT CORNER) ── -->
     <div id="ai-copilot-fab" onclick="toggleCopilotDrawer()"
         title="Open AI Compliance Assistant (Ask questions about current page)">
         <span class="copilot-label">AI Compliance Assistant</span>

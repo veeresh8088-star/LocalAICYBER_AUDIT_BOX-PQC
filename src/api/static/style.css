@@ -30,6 +30,7 @@ body {
     font-family: var(--font-sans);
     line-height: 1.5;
     height: 100vh;
+    width: 100vw;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
 }
@@ -428,14 +429,19 @@ button {
 
 /* ── MAIN SHELL LAYOUT ── */
 #app-shell {
-    display: grid;
-    grid-template-columns: 340px 1fr;
+    display: flex;
     height: 100vh;
     width: 100vw;
+    overflow: hidden;
+    position: relative;
 }
 
 /* Left Sidebar */
 .sidebar {
+    width: var(--sidebar-width, 340px);
+    min-width: 240px;
+    max-width: 650px;
+    flex-shrink: 0;
     background-color: #0c101d;
     border-right: 1px solid var(--border-color);
     display: flex;
@@ -445,6 +451,75 @@ button {
     max-height: 100vh;
     overflow-y: auto !important;
     overflow-x: hidden !important;
+    box-sizing: border-box;
+}
+
+body.is-resizing .sidebar {
+    transition: none !important;
+    user-select: none !important;
+}
+
+body.is-resizing {
+    cursor: col-resize !important;
+    user-select: none !important;
+}
+
+/* Sidebar Resizer Drag Handle */
+.sidebar-resizer-handle {
+    width: 10px;
+    height: 100vh;
+    background: transparent;
+    cursor: col-resize;
+    position: relative;
+    z-index: 50;
+    flex-shrink: 0;
+    margin-left: -5px;
+    margin-right: -5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+}
+
+.sidebar-resizer-handle::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 2px;
+    background: rgba(148, 163, 184, 0.2);
+    transition: background 0.2s ease, width 0.2s ease, box-shadow 0.2s ease;
+}
+
+.sidebar-resizer-handle:hover::before,
+.sidebar-resizer-handle.is-dragging::before {
+    background: #3b82f6;
+    width: 4px;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.7);
+}
+
+.resizer-grip-icon {
+    width: 4px;
+    height: 28px;
+    background: rgba(148, 163, 184, 0.5);
+    border-radius: 4px;
+    z-index: 101;
+    transition: background 0.2s ease, height 0.2s ease, box-shadow 0.2s ease;
+}
+
+.sidebar-resizer-handle:hover .resizer-grip-icon,
+.sidebar-resizer-handle.is-dragging .resizer-grip-icon {
+    background: #ffffff;
+    height: 36px;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
+}
+
+.workspace {
+    flex: 1;
+    min-width: 0;
+    height: 100vh;
+    overflow-y: auto;
 }
 
 /* ── UNIVERSAL LIGHT GREY SCROLLBAR STYLING (MATCHING SCREENSHOT) ── */
@@ -706,8 +781,7 @@ body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
 }
 
 #active-session-badge {
-    font-size: 0.72rem;
-    color: var(--text-muted);
+    display: none !important;
 }
 
 .header-right {
@@ -2071,29 +2145,36 @@ body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
     color: #0f172a !important;
 }
 
-/* ── FLOATING AI COPILOT FAB & DRAWER ── */
+/* ── FLOATING AI COPILOT FAB & DRAWER (LEFT SIDEBAR ANCHORED) ── */
 #ai-copilot-fab {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    z-index: 9900;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: linear-gradient(135deg, #2563eb, #1d4ed8);
-    color: #ffffff;
-    padding: 12px 20px;
-    border-radius: 50px;
-    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.4), 0 0 0 2px rgba(255, 255, 255, 0.2);
-    cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-    font-weight: 700;
-    font-size: 0.88rem;
+    position: fixed !important;
+    bottom: 16px !important;
+    left: 16px !important;
+    right: auto !important;
+    width: calc(var(--sidebar-width, 340px) - 32px) !important;
+    max-width: calc(var(--sidebar-width, 340px) - 32px) !important;
+    z-index: 9990 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+    color: #ffffff !important;
+    padding: 9px 12px !important;
+    border-radius: 50px !important;
+    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.4), 0 0 0 2px rgba(255, 255, 255, 0.2) !important;
+    cursor: pointer !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+    font-weight: 700 !important;
+    font-size: 0.8rem !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
 }
 
 #ai-copilot-fab:hover {
-    transform: translateY(-3px) scale(1.03);
-    box-shadow: 0 12px 30px rgba(37, 99, 235, 0.6);
+    transform: translateY(-2px) scale(1.02) !important;
+    box-shadow: 0 12px 30px rgba(37, 99, 235, 0.6) !important;
 }
 
 .copilot-status-dot {
@@ -2103,18 +2184,20 @@ body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
 }
 
 .copilot-drawer {
-    position: fixed;
-    bottom: 85px;
-    right: 24px;
-    width: 420px;
-    height: 560px;
-    max-height: 80vh;
-    background: rgba(15, 23, 42, 0.95);
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    border-radius: 20px;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(20px);
-    z-index: 9900;
+    position: fixed !important;
+    bottom: 65px !important;
+    left: 16px !important;
+    right: auto !important;
+    width: 420px !important;
+    max-width: calc(100vw - 32px) !important;
+    height: 570px !important;
+    max-height: 82vh !important;
+    z-index: 9999 !important;
+    background: rgba(15, 23, 42, 0.97) !important;
+    border: 1px solid rgba(148, 163, 184, 0.25) !important;
+    border-radius: 20px !important;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(99, 102, 241, 0.25) !important;
+    backdrop-filter: blur(24px);
     display: flex;
     flex-direction: column;
     overflow: hidden;

@@ -304,7 +304,8 @@ async function handleOTPSubmit(e) {
 
         // Login Successful
         document.getElementById("auth-overlay").classList.remove("active");
-        document.getElementById("app-shell").style.display = "grid";
+        document.getElementById("app-shell").style.display = "flex";
+        initResizableSidebar();
 
         initializeDashboard(currentUser);
     } catch (err) {
@@ -784,7 +785,7 @@ async function switchRecentSession(sessionId, sessionTitle) {
     // ── Reset UI: Scan run button ─────────────────────────────────────────────────
     const runBtn = document.getElementById("run-analysis-btn");
     const stopBtn = document.getElementById("stop-analysis-btn");
-    if (runBtn) { runBtn.disabled = false; runBtn.style.opacity = "1"; runBtn.innerText = "▶ Step 3: Run RAG Scan"; }
+    if (runBtn) { runBtn.disabled = false; runBtn.style.opacity = "1"; runBtn.innerText = "▶ Run Audit Scan"; }
     if (stopBtn) stopBtn.style.display = "none";
 
     // ── Restore or Reset UI: Controls checkboxes & scoping mode ───────────────────
@@ -795,7 +796,7 @@ async function switchRecentSession(sessionId, sessionTitle) {
             customControlDocuments = null;
             if (typeof selectAllCheckboxes === "function") selectAllCheckboxes(false);
             if (typeof updateSelectedScopeCount === "function") updateSelectedScopeCount();
-            if (typeof setScopingMode === "function") setScopingMode('AI Auto-Scoping');
+            if (typeof setScopingMode === "function") setScopingMode('EXCEL');
         }
 
         // Clear search box so "5.15" from previous session doesn't persist
@@ -970,7 +971,7 @@ async function discardCheckpointAndReset() {
 
         const runBtn = document.getElementById("run-analysis-btn");
         const stopBtn = document.getElementById("stop-analysis-btn");
-        if (runBtn) { runBtn.disabled = false; runBtn.style.opacity = "1"; runBtn.innerText = "▶ Step 3: Run RAG Scan"; }
+        if (runBtn) { runBtn.disabled = false; runBtn.style.opacity = "1"; runBtn.innerText = "▶ Run Audit Scan"; }
         if (stopBtn) stopBtn.style.display = "none";
     } catch (err) {
         showToast(`Discard failed: ${err.message}`, "error");
@@ -1166,8 +1167,8 @@ async function startNewAuditSession(skipPrompt = false, customTitle = null) {
             if (typeof selectAllCheckboxes === "function") selectAllCheckboxes(false);
             if (typeof updateSelectedScopeCount === "function") updateSelectedScopeCount();
 
-            // Reset to AI Auto-Scoping (no Excel scope from old session)
-            if (typeof setScopingMode === "function") setScopingMode('AI Auto-Scoping');
+            // Reset to Excel Upload Scope (no scope from old session)
+            if (typeof setScopingMode === "function") setScopingMode('EXCEL');
 
             // Clear search filter — "5.15" or any other previous term persisted across sessions
             const searchInput = document.getElementById("controls-search-input");
@@ -1602,14 +1603,30 @@ async function clearAllUploadedFiles() {
 }
 
 function setAnalysisMode(mode) {
+    const frameworkSelect = document.getElementById("framework-select");
+    const fwVal = frameworkSelect ? frameworkSelect.value.toUpperCase() : "";
+    const isTechnical = fwVal.includes("VAPT") || fwVal.includes("PQC");
+    const isGovernance = (
+        fwVal.includes("ISO") || fwVal.includes("SOC") ||
+        fwVal.includes("DPDP") || fwVal.includes("BCMS") ||
+        fwVal.includes("XBOM") || fwVal.includes("X-BOM")
+    );
+
+    if (isTechnical && (mode === "Quick" || mode === "Deep")) {
+        mode = "Technical findings only";
+    }
+    if (isGovernance && mode === "Technical findings only") {
+        mode = "Deep";
+    }
+
     selectedAnalysisMode = mode;
-    const btnFastParser = document.getElementById("btn-mode-fast-parser");
+    const btnScanner = document.getElementById("btn-mode-fast-parser");
     const btnQuick = document.getElementById("btn-mode-quick");
     const btnDeep = document.getElementById("btn-mode-deep");
 
-    const allBtns = [btnFastParser, btnQuick, btnDeep];
+    const allBtns = [btnScanner, btnQuick, btnDeep];
 
-    const activeBtn = mode === "Technical findings only" ? btnFastParser
+    const activeBtn = mode === "Technical findings only" ? btnScanner
         : mode === "Quick" ? btnQuick
             : btnDeep;
 
@@ -1626,61 +1643,95 @@ function setAnalysisMode(mode) {
 }
 
 // ─── Framework-to-Mode Auto-Routing ──────────────────────────────────────────
-// VAPT / PQC   → default Fast Parser (100% deterministic, 0 LLM compute).
-//               User can still manually switch to Quick/Deep for auditing
-//               written PenTest PDFs or PQC policy documents.
-// Governance   → ISO 27001 / SOC 2 / DPDP / BCMS / X-BOM always require LLM
-//               reasoning for policy vs evidence evaluation. Fast Parser is
-//               disabled and mode is locked to Deep Audit. A friendly notice
-//               is shown explaining why.
-// Other/none   → Restore previous user-chosen mode; hide governance notice.
+// VAPT / PQC   → Mode locked to Scanner (Python Parsers + LLM Engine).
+//               Quick Audit & Deep Audit buttons are greyed out & disabled.
+// Governance   → ISO 27001 / SOC 2 / DPDP / BCMS / X-BOM require LLM
+//               reasoning for policy vs evidence evaluation. Scanner is
+//               disabled and mode is set to Deep Audit.
 // ─────────────────────────────────────────────────────────────────────────────
 function onFrameworkChangeSuggestMode() {
     const frameworkSelect = document.getElementById("framework-select");
     const fwVal = frameworkSelect ? frameworkSelect.value.toUpperCase() : "";
     if (typeof setAnalysisMode !== "function") return;
 
-    const btnFastParser = document.getElementById("btn-mode-fast-parser");
-    const govNotice = document.getElementById("mode-governance-notice");
+    const btnScanner = document.getElementById("btn-mode-fast-parser");
+    const btnQuick = document.getElementById("btn-mode-quick");
+    const btnDeep = document.getElementById("btn-mode-deep");
 
-    // Governance frameworks: ISO 27001, SOC 2, DPDP, BCMS, X-BOM
     const isGovernance = (
         fwVal.includes("ISO") || fwVal.includes("SOC") ||
         fwVal.includes("DPDP") || fwVal.includes("BCMS") ||
         fwVal.includes("XBOM") || fwVal.includes("X-BOM")
     );
-    // Technical frameworks: VAPT, PQC
     const isTechnical = fwVal.includes("VAPT") || fwVal.includes("PQC");
 
-    if (isGovernance) {
-        // Lock to Deep Audit — Fast Parser is meaningless for policy documents
+    if (isTechnical) {
+        // VAPT / PQC → Lock mode to Scanner; Grey out Quick & Deep Audit buttons!
+        if (btnQuick) {
+            btnQuick.disabled = true;
+            btnQuick.style.opacity = "0.35";
+            btnQuick.style.cursor = "not-allowed";
+            btnQuick.title = "Quick Audit is disabled for VAPT and PQC. Mode is locked to Scanner (Parser + LLM Engine).";
+        }
+        if (btnDeep) {
+            btnDeep.disabled = true;
+            btnDeep.style.opacity = "0.35";
+            btnDeep.style.cursor = "not-allowed";
+            btnDeep.title = "Deep Audit is disabled for VAPT and PQC. Mode is locked to Scanner (Parser + LLM Engine).";
+        }
+        if (btnScanner) {
+            btnScanner.disabled = false;
+            btnScanner.style.opacity = "1";
+            btnScanner.style.cursor = "pointer";
+            btnScanner.title = "Scanner mode: Technical scan of Nessus, Burp Suite, Nmap, Qualys, Trivy, PQC configs & images using Python Parsers + LLM Engine.";
+        }
+        setAnalysisMode("Technical findings only");
+    } else if (isGovernance) {
+        // Governance frameworks (ISO / SOC 2 / etc.) → Enable Quick & Deep; Disable Scanner
+        if (btnQuick) {
+            btnQuick.disabled = false;
+            btnQuick.style.opacity = "1";
+            btnQuick.style.cursor = "pointer";
+            btnQuick.title = "Quick Audit mode.";
+        }
+        if (btnDeep) {
+            btnDeep.disabled = false;
+            btnDeep.style.opacity = "1";
+            btnDeep.style.cursor = "pointer";
+            btnDeep.title = "Deep Audit mode.";
+        }
+        if (btnScanner) {
+            btnScanner.disabled = true;
+            btnScanner.style.opacity = "0.35";
+            btnScanner.style.cursor = "not-allowed";
+            btnScanner.title = "Scanner is not available for governance frameworks. AI reasoning is required to evaluate policies and evidence.";
+        }
         setAnalysisMode("Deep");
-        if (btnFastParser) {
-            btnFastParser.disabled = true;
-            btnFastParser.style.opacity = "0.35";
-            btnFastParser.style.cursor = "not-allowed";
-            btnFastParser.title = "Fast Parser is not available for governance frameworks. AI reasoning is required to evaluate policies and evidence.";
-        }
-        if (govNotice) govNotice.style.display = "block";
     } else {
-        // Unlock Fast Parser (restore for VAPT/PQC or other frameworks)
-        if (btnFastParser) {
-            btnFastParser.disabled = false;
-            btnFastParser.style.opacity = "1";
-            btnFastParser.style.cursor = "pointer";
-            btnFastParser.title = "Instant deterministic rule-based parser: Nessus, Burp Suite, Nmap, Qualys, Trivy, PQC configs, PDF/DOCX/images. Zero LLM compute. 100% accurate, <1 second.";
+        // Default / None
+        if (btnQuick) {
+            btnQuick.disabled = false;
+            btnQuick.style.opacity = "1";
+            btnQuick.style.cursor = "pointer";
         }
-        if (govNotice) govNotice.style.display = "none";
+        if (btnDeep) {
+            btnDeep.disabled = false;
+            btnDeep.style.opacity = "1";
+            btnDeep.style.cursor = "pointer";
+        }
+        if (btnScanner) {
+            btnScanner.disabled = false;
+            btnScanner.style.opacity = "1";
+            btnScanner.style.cursor = "pointer";
+        }
+    }
 
-        if (isTechnical) {
-            // VAPT / PQC → default to Fast Parser
-            setAnalysisMode("Technical findings only");
-        } else if (selectedAnalysisMode === "Technical findings only") {
-            // Switching away from VAPT/PQC to a non-governance framework:
-            // Fast Parser is valid but odd choice — reset to Deep so the user
-            // doesn't accidentally stay in scanner-only mode for unrelated docs.
-            setAnalysisMode("Deep");
-        }
+    const btnAiScoping = document.getElementById("btn-ai-scoping");
+    if (btnAiScoping) {
+        btnAiScoping.style.display = isTechnical ? "flex" : "none";
+    }
+    if (!isTechnical && window.currentScopingMode === "AI") {
+        setScopingMode("EXCEL");
     }
 }
 
@@ -1752,21 +1803,27 @@ function setScopingMode(mode) {
     // Reset active class on all buttons
     [aiBtn, chkBtn, excelBtn].forEach(b => { if (b) b.classList.remove("active-scope-mode"); });
 
-    if (mode === "AI" || mode.includes("AI")) {
+    const modeStr = String(mode || "").toUpperCase();
+
+    if (modeStr === "AI" || modeStr.includes("AUTO")) {
         if (aiBtn) aiBtn.classList.add("active-scope-mode");
         if (excelDropzone) excelDropzone.style.display = "none";
-        if (checklistBox) checklistBox.style.display = "none";
-        if (statusNote) statusNote.innerHTML = `<span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>AI Auto-Scoping</b> — Automatically detecting applicable controls from evidence files.`;
-    } else if (mode === "EXCEL" || mode.includes("Excel")) {
+        if (checklistBox) checklistBox.style.display = "block";
+        if (statusNote) statusNote.innerHTML = `<span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>AI Auto-Scoping</b> — Automatically detects technical scan findings across VAPT / PQC assets.`;
+        window.currentScopingMode = "AI";
+    } else if (modeStr === "MANUAL" || modeStr.includes("MANUAL")) {
+        if (chkBtn) chkBtn.classList.add("active-scope-mode");
+        if (excelDropzone) excelDropzone.style.display = "none";
+        if (checklistBox) checklistBox.style.display = "block";
+        if (statusNote) statusNote.innerHTML = `<span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>Manual Scope</b> — Select or unselect specific controls from accordions below.`;
+        window.currentScopingMode = "MANUAL";
+    } else {
+        // Default to EXCEL Upload Scope
         if (excelBtn) excelBtn.classList.add("active-scope-mode");
         if (excelDropzone) excelDropzone.style.display = "block";
         if (checklistBox) checklistBox.style.display = "block";
         if (statusNote) statusNote.innerHTML = `<span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>Excel Upload Scope</b> — Drag & drop or browse an Excel scoping matrix (.xlsx) below.`;
-    } else {
-        if (chkBtn) chkBtn.classList.add("active-scope-mode");
-        if (excelDropzone) excelDropzone.style.display = "none";
-        if (checklistBox) checklistBox.style.display = "block";
-        if (statusNote) statusNote.innerHTML = `<span style="color:#10b981;font-weight:700;">🟢 Active:</span> <b>Manual Checklist Scope</b> — Select or unselect specific controls from accordions below.`;
+        window.currentScopingMode = "EXCEL";
     }
 }
 
@@ -2488,7 +2545,7 @@ async function triggerAuditAnalysis() {
     if (selectedSls.length === 0) {
         alert("⚠️ Please select at least one control to analyze.");
         btn.disabled = false;
-        btn.innerText = "▶ Run RAG Scan";
+        btn.innerText = "▶ Run Audit Scan";
         if (stopBtn) stopBtn.style.display = "none";
         return;
     }
@@ -2521,7 +2578,7 @@ async function triggerAuditAnalysis() {
     if (totalEvidenceCount === 0) {
         alert("⚠️ Please upload at least one evidence file before starting the audit.");
         btn.disabled = false;
-        btn.innerText = "▶ Run RAG Scan";
+        btn.innerText = "▶ Run Audit Scan";
         if (stopBtn) stopBtn.style.display = "none";
         return;
     }
@@ -2580,7 +2637,7 @@ async function triggerAuditAnalysis() {
         progressInterval = setInterval(pollAuditProgress, 1000);
     } catch (err) {
         btn.disabled = false;
-        btn.innerText = "▶ Run RAG Scan";
+        btn.innerText = "▶ Run Audit Scan";
         if (stopBtn) stopBtn.style.display = "none";
         const msg = String(err.message || "");
         if (msg.toLowerCase().includes("failed to fetch") || msg.toLowerCase().includes("networkerror")) {
@@ -2668,7 +2725,7 @@ async function pollAuditProgress() {
             if (activeSessionId !== targetSessionId) return;
 
             btn.disabled = false;
-            btn.innerText = "▶ Step 3: Run RAG Scan";
+            btn.innerText = "▶ Run Audit Scan";
             if (stopBtn) stopBtn.style.display = "none";
             if (progressBar) progressBar.style.width = `100%`;
             if (progressPercent) progressPercent.innerText = `100%`;
@@ -2689,7 +2746,7 @@ async function pollAuditProgress() {
         } else if (data.status === "idle" && data.checkpoint && data.checkpoint.status === "failed") {
             clearInterval(progressInterval);
             btn.disabled = false;
-            btn.innerText = "▶ Step 3: Run RAG Scan";
+            btn.innerText = "▶ Run Audit Scan";
             if (stopBtn) stopBtn.style.display = "none";
             if (progressStatus) progressStatus.innerText = `Scan failed`;
             alert("❌ Analysis failed. Verify Ollama or local llama-server is running.");
@@ -2697,7 +2754,7 @@ async function pollAuditProgress() {
             // If scan is idle, stopped, or not running, reset state cleanly
             clearInterval(progressInterval);
             btn.disabled = false;
-            btn.innerText = "▶ Step 3: Run RAG Scan";
+            btn.innerText = "▶ Run Audit Scan";
             if (stopBtn) {
                 stopBtn.style.display = "none";
                 stopBtn.disabled = false;
@@ -2768,7 +2825,7 @@ async function stopAuditAnalysis() {
             if (btn) {
                 btn.disabled = false;
                 btn.style.opacity = "1";
-                btn.innerText = "▶ Step 3: Run RAG Scan";
+                btn.innerText = "▶ Run Audit Scan";
             }
             if (stopBtn) {
                 stopBtn.style.display = "none";
@@ -2782,7 +2839,7 @@ async function stopAuditAnalysis() {
         if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
         if (btn) {
             btn.disabled = false;
-            btn.innerText = "▶ Step 3: Run RAG Scan";
+            btn.innerText = "▶ Run Audit Scan";
         }
         if (stopBtn) {
             stopBtn.style.display = "none";
@@ -2856,7 +2913,7 @@ async function loadFindings() {
                 banner.style.background = "rgba(30, 41, 59, 0.6)";
                 banner.style.borderColor = "rgba(148, 163, 184, 0.25)";
                 banner.style.color = "#cbd5e1";
-                if (bannerText) bannerText.innerHTML = `<b>ShakthiDB Audit Notice:</b> No control evaluations recorded in ledger yet. Navigate to <b>Scan workspace</b> tab, upload compliance evidence documents, and execute <b>Step 3: Run RAG Scan</b> to evaluate all target controls.`;
+                if (bannerText) bannerText.innerHTML = `<b>ShakthiDB Audit Notice:</b> No control evaluations recorded in ledger yet. Navigate to <b>Scan workspace</b> tab, upload compliance evidence documents, and execute <b>Run Audit Scan</b> to evaluate all target controls.`;
                 container.innerHTML = `<div class="empty-state">No control evaluations recorded for active session. Switch to <b>Scan workspace</b> tab to upload evidence documents and run AI audit evaluation.</div>`;
             }
         }
@@ -4012,16 +4069,24 @@ function formatRemediationSteps(text, color) {
 
 function _isOcrNoiseText(str) {
     if (!str || typeof str !== "string") return false;
-    return str.includes("[Embedded Image OCR]") || /^\[Embedded Image OCR\]/i.test(str) || /ocr/i.test(str);
+    return str.includes("[Embedded Image OCR]") || /^\[Embedded Image OCR\]/i.test(str) || /ocr|mobaxterm|timedatectl|ntp synchronized|root@/i.test(str);
 }
 
 function _cleanOcrText(str) {
     if (!str || typeof str !== "string") return "";
-    return str
+    let cleaned = str
         .replace(/^\[Embedded Image OCR\]:\s*/gi, "")
         .replace(/\b(jpg|png|jpeg|bmp|svg)\b/gi, "")
+        // Clean out terminal directory listing noise (ls -l output)
+        .replace(/\b(local|mozila|pki|Desktop|Documents|Downloads|Music|Pictures|Public|Templates|Videos|bash_history|bash_logout|bash_profile|bashrc|\.cshrc|esd_auth|ICEauthority|mysql_history|tcshrc)\b/g, "")
+        // Clean out MobaXterm advertising footer noise
+        .replace(/Remote monitoring Follow terminal folder UNREGISTERED.*?by subscribing to the professional edition here:?\s*http[s]?:\/\/[^\s]+/gi, "")
+        .replace(/UNREGISTERED VERSION.*?mobatek\.net/gi, "")
+        .replace(/VERSION o Please: support\.MobaXterm.*$/gi, "")
+        .replace(/i Search - [àaA\s\.\-]+$/gi, "")
         .replace(/\s+/g, " ")
         .trim();
+    return cleaned;
 }
 
 function formatEvidenceSnippet(snip) {
@@ -4038,8 +4103,27 @@ function formatEvidenceSnippet(snip) {
         return "System Screenshot Evidence verified via Optical Character Recognition (OCR).";
     }
 
-    // ── Structure CloudWatch & System Monitoring OCR Evidence ──
+    // ── Clean Terminal / Screenshot OCR Text ──
     const lowerSnip = snip.toLowerCase();
+    const isTerminalOrNtp = /ntp|timedatectl|clock|mobaxterm|root@|systemd-timesyncd|chronyd/i.test(snip);
+
+    if (isTerminalOrNtp) {
+        let bullets = [];
+        let hostMatch = snip.match(/root@([a-zA-Z0-9_\-]+)/i);
+        let hostName = hostMatch ? hostMatch[1] : "";
+
+        let isNtpSynced = /ntp\s+synchronized:\s*yes|clock\s+synchronized:\s*yes|ntp\s+active|synchronized:\s*yes/i.test(snip);
+        let isRtcLocal = /rtc\s+in\s+local\s+tz:\s*yes/i.test(snip);
+
+        bullets.push("🖥️ TERMINAL SYSTEM EVIDENCE (Clock Synchronization):");
+        if (hostName) bullets.push(`• Verified Target Host: ${hostName}`);
+        bullets.push(`• NTP Clock Synchronized: ${isNtpSynced ? 'YES (Active)' : 'NO / Unconfirmed'}`);
+        bullets.push(`• Real-Time Clock (RTC) Config: ${isRtcLocal ? 'Local Timezone' : 'UTC (Standard)'}`);
+
+        return bullets.join("\n");
+    }
+
+    // ── Structure CloudWatch & System Monitoring OCR Evidence ──
     const isCloudWatchOrMetrics = /cloudwatch|aws\/ec2|mem_used|cpuutilization|ebswriteops|ebsreadops|srit-monitoring/i.test(snip);
 
     if (isCloudWatchOrMetrics) {
@@ -4070,7 +4154,6 @@ function formatEvidenceSnippet(snip) {
             bullets.push(`• Active Resource Metrics: ${metrics.join(" | ")}`);
         }
 
-        // Clean up repeated raw text snippet for the raw excerpt box
         let cleanExcerpt = snip
             .replace(/(AWS\/EC2\s+i-[0-9a-f]{17}\s*\([^)]*\)\s*)+/gi, "AWS/EC2 Instance ")
             .replace(/\s+/g, " ")
@@ -4083,7 +4166,7 @@ function formatEvidenceSnippet(snip) {
         return `${bullets.join("\n")}\n\n[Cleaned Dashboard Metric Excerpt]:\n"${cleanExcerpt}"`;
     }
 
-    // ── Structure OCR Noise Text ──
+    // ── Structure General OCR Noise Text ──
     if (_isOcrNoiseText(snip)) {
         const rawOcr = snip.replace(/^\[Embedded Image OCR\]:\s*/i, "").trim();
         let cleanedOcr = _cleanOcrText(rawOcr);
@@ -4113,21 +4196,43 @@ function formatEvidenceSnippet(snip) {
         return `${summaryHeader}\n${bulletText}\n\n[Extracted & Cleaned Screenshot Evidence Text]:\n"${cleanedOcr}"`;
     }
 
-    // Handle multi-line / multiple quotes nicely with bullet formatting
-    if (snip.includes("\n\n")) {
-        const parts = snip.split("\n\n").map(p => p.trim()).filter(Boolean);
-        if (parts.length > 1) {
-            return parts.map((p, idx) => `[Evidence Quote ${idx + 1}]:\n"${p}"`).join("\n\n");
-        }
-    }
-
+    // Return snippet cleanly without adding fragmented quote headers
     return snip;
 }
 
 const EVIDENCE_SNIPPET_PRE_STYLE = "margin:0; font-family:'Consolas','Fira Code',monospace; font-size:0.78rem; color:#f8fafc; background:rgba(15,23,42,0.9); padding:10px 12px; border-radius:8px; border:1px solid rgba(59,130,246,0.3); line-height:1.45; white-space:pre-wrap; word-break:break-word;";
 
 function buildRequirementQuestionHtml(f) {
-    const qText = (f && f.requirement_question) ? String(f.requirement_question).trim() : "Requirement question not provided";
+    if (!f) return "";
+    let qText = (f.requirement_question || f.question || "").trim();
+    
+    // Also check if title or control_name contains question after ' — '
+    if (!qText && f.title && f.title.includes(" — ")) {
+        const parts = f.title.split(" — ");
+        if (parts.length > 1) qText = parts.slice(1).join(" — ").trim();
+    }
+    if (!qText && f.control_name && f.control_name.includes(" — ")) {
+        const parts = f.control_name.split(" — ");
+        if (parts.length > 1) qText = parts.slice(1).join(" — ").trim();
+    }
+
+    if (!qText) return "";
+
+    const lowerQ = qText.toLowerCase();
+    const ctrlIdLower = String(f.control_id || "").toLowerCase().trim();
+    const ctrlNameLower = String(f.control_name || "").toLowerCase().trim();
+
+    // Do NOT render AUDIT QUESTION section if generic fallback text or matches control name
+    if (
+        lowerQ === "requirement question not provided" ||
+        lowerQ === "general control requirement" ||
+        lowerQ === "no question provided" ||
+        (ctrlIdLower && lowerQ === ctrlIdLower) ||
+        (ctrlNameLower && lowerQ === ctrlNameLower)
+    ) {
+        return "";
+    }
+
     return `
     <div class="finding-detail-row" style="margin-bottom: 12px;">
         <label style="font-weight:700; font-size:0.78rem; color:#3b82f6; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">AUDIT QUESTION</label>
@@ -4157,9 +4262,9 @@ function buildEvidenceSnippetHtml(rawSnip, f_obj) {
         } catch (e) { }
     }
 
-    const polSnip = (f_obj && f_obj.policy_snippet) || (polItems.length > 0 ? polItems.map(it => it.extracted_text).filter(Boolean).join("\n\n") : "");
-    const opSnip = (f_obj && f_obj.operational_evidence_snippet) || (evItems.length > 0 ? evItems.map(it => it.extracted_text).filter(Boolean).join("\n\n") : "");
-    const hasEvidenceText = opSnip && opSnip.trim().length > 5 && !opSnip.toUpperCase().includes("NOT_FOUND");
+    const polSnip = (f_obj && f_obj.policy_snippet) || (polItems.length > 0 ? polItems.map(it => it.extracted_text).filter(Boolean).join("\n\n") : "") || (f_obj && f_obj.policy_quote) || (f_obj && f_obj.policy_excerpt) || "";
+    const opSnip = (f_obj && f_obj.operational_evidence_snippet) || (evItems.length > 0 ? evItems.map(it => it.extracted_text).filter(Boolean).join("\n\n") : "") || rawSnip || (f_obj && f_obj.evidence_snippet) || (f_obj && f_obj.evidence_quote) || "";
+    const hasEvidenceText = opSnip && opSnip.trim().length > 5 && !opSnip.toUpperCase().includes("NOT_FOUND") && !opSnip.toUpperCase().includes("NO RELEVANT EVIDENCE");
 
     let polHtml = "";
     if (polSnip && polSnip.trim()) {
@@ -4176,8 +4281,6 @@ function buildEvidenceSnippetHtml(rawSnip, f_obj) {
         } else {
             polHtml = `<div style="margin-bottom:14px;"><div style="font-size:0.75rem; font-weight:700; color:#38bdf8; letter-spacing:0.5px; margin-bottom:4px;">📜 DOCUMENTED POLICY STATEMENTS</div><pre class="finding-snippet" style="${EVIDENCE_SNIPPET_PRE_STYLE}">${escapeHtml(formatEvidenceSnippet(polSnip))}</pre></div>`;
         }
-    } else if (f_obj && f_obj.policy_required === false) {
-        polHtml = `<div style="margin-bottom:14px;"><div style="font-size:0.75rem; font-weight:700; color:#38bdf8; letter-spacing:0.5px; margin-bottom:4px;">📜 DOCUMENTED POLICY STATEMENTS</div><div style="font-size:0.8rem; color:#38bdf8; font-style:italic; padding:6px 10px; background:rgba(30,41,59,0.5); border:1px solid rgba(56,189,248,0.2); border-radius:4px;">Policy not required for this requirement.</div></div>`;
     } else {
         polHtml = `<div style="margin-bottom:14px;"><div style="font-size:0.75rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; margin-bottom:4px;">📜 DOCUMENTED POLICY STATEMENTS</div><div style="font-size:0.8rem; color:#64748b; font-style:italic; padding:6px 10px; background:rgba(30,41,59,0.5); border-radius:4px;">NO DOCUMENTED POLICY IDENTIFIED</div></div>`;
     }
@@ -4197,11 +4300,11 @@ function buildEvidenceSnippetHtml(rawSnip, f_obj) {
 
     let opHtml = "";
     if (evStatus === "FOUND" && evAssess === "COMPLIANT" && hasEvidenceText) {
-        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#c084fc; letter-spacing:0.5px; margin-bottom:4px;">🔍 EVIDENCE (RECORDS, LOGS, CONFIGURATIONS, SCREENSHOTS) — COMPLIANT</div>${itemsChipsHtml}<pre class="finding-snippet" style="${EVIDENCE_SNIPPET_PRE_STYLE.replace('rgba(59,130,246,0.3)', 'rgba(192,132,252,0.3)')}">${escapeHtml(formatEvidenceSnippet(opSnip))}</pre></div>`;
+        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#c084fc; letter-spacing:0.5px; margin-bottom:4px;">🔍 OPERATIONAL EVIDENCE</div>${itemsChipsHtml}<pre class="finding-snippet" style="${EVIDENCE_SNIPPET_PRE_STYLE.replace('rgba(59,130,246,0.3)', 'rgba(192,132,252,0.3)')}">${escapeHtml(formatEvidenceSnippet(opSnip))}</pre></div>`;
     } else if (evStatus === "FOUND" && evAssess === "NON_COMPLIANT" && hasEvidenceText) {
-        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#f59e0b; letter-spacing:0.5px; margin-bottom:4px;">⚠️ EVIDENCE FOUND — NON-COMPLIANT ASSESSMENT</div>${itemsChipsHtml}<pre class="finding-snippet" style="${EVIDENCE_SNIPPET_PRE_STYLE.replace('rgba(59,130,246,0.3)', 'rgba(245,158,11,0.3)')}">${escapeHtml(formatEvidenceSnippet(opSnip))}</pre><div style="font-size:0.74rem; color:#fbbf24; margin-top:4px;">Note: Evidence artifact exists, but does not satisfy the control requirements.</div></div>`;
+        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#f59e0b; letter-spacing:0.5px; margin-bottom:4px;">⚠️ OPERATIONAL EVIDENCE — NON-COMPLIANT ASSESSMENT</div>${itemsChipsHtml}<pre class="finding-snippet" style="${EVIDENCE_SNIPPET_PRE_STYLE.replace('rgba(59,130,246,0.3)', 'rgba(245,158,11,0.3)')}">${escapeHtml(formatEvidenceSnippet(opSnip))}</pre><div style="font-size:0.74rem; color:#fbbf24; margin-top:4px;">Note: Evidence artifact exists, but does not satisfy the control requirements.</div></div>`;
     } else {
-        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; margin-bottom:4px;">🔍 EVIDENCE (RECORDS, LOGS, CONFIGURATIONS, SCREENSHOTS)</div><div style="font-family:'Consolas','Fira Code',monospace; font-size:0.78rem; color:#f87171; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); padding:10px 12px; border-radius:8px; line-height:1.45; font-weight:700;">❌ NO RELEVANT EVIDENCE FOUND<br><span style="font-weight:400; color:#cbd5e1; font-size:0.75rem;">No valid evidence artifact (configuration, log, report, record, screenshot, assessment) addressing this control objective was located.</span></div></div>`;
+        opHtml = `<div style="margin-bottom:8px;"><div style="font-size:0.75rem; font-weight:700; color:#94a3b8; letter-spacing:0.5px; margin-bottom:4px;">🔍 OPERATIONAL EVIDENCE</div><div style="font-family:'Consolas','Fira Code',monospace; font-size:0.78rem; color:#f87171; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); padding:10px 12px; border-radius:8px; line-height:1.45; font-weight:700;">❌ NO RELEVANT EVIDENCE FOUND<br><span style="font-weight:400; color:#cbd5e1; font-size:0.75rem;">No valid evidence artifact (configuration, log, report, record, screenshot, assessment) addressing this control objective was located.</span></div></div>`;
     }
 
     return polHtml + opHtml;
@@ -4284,8 +4387,13 @@ function buildRequirementsCoveragePanelHtml(f) {
 
 function getCleanFindingDescription(f) {
     if (!f) return "Control evaluation performed against compliance requirements.";
-    let raw = f.description || f.finding || f.reasoning || f.gap_description || "";
+    let raw = f.justification || f.description || f.finding || f.reasoning || f.gap_description || "";
     if (typeof raw !== "string") raw = String(raw);
+
+    // If description is generic boilerplate but justification has real content, prefer justification
+    if (raw.includes("could not conclusively confirm every requirement is met") && f.justification && f.justification.length > 30) {
+        raw = f.justification;
+    }
 
     // A control that was never evaluated must keep saying so. This rewrite exists
     // to keep raw engine errors out of a customer-facing report, but applying it to
@@ -4632,29 +4740,37 @@ function renderFindingsList() {
         const titleStr = (f.title || f.finding_title || '').trim();
 
         let displayHeaderTitle = "";
-        if (ctrlIdStr) {
-            // Check if ctrlIdStr is already a full title (e.g. "5.15 Access Control")
-            const hasFullTextInId = ctrlIdStr.length > 8 && /\s+[A-Za-z]/.test(ctrlIdStr);
-            if (hasFullTextInId) {
-                displayHeaderTitle = ctrlIdStr;
-            } else {
-                // Short ID code like "PQC-2", "PQC-10", "VAPT-01", "5.15"
-                const descText = (ctrlNameStr && ctrlNameStr !== ctrlIdStr && !ctrlIdStr.toLowerCase().includes(ctrlNameStr.toLowerCase())) ? ctrlNameStr
-                    : (titleStr && titleStr !== ctrlIdStr && !ctrlIdStr.toLowerCase().includes(titleStr.toLowerCase())) ? titleStr
-                        : "";
-                displayHeaderTitle = descText ? `${ctrlIdStr} — ${descText}` : ctrlIdStr;
-            }
-        } else if (ctrlNameStr) {
+        let auditQuestionSubtext = (f.audit_question || f.question || f.checklist_question || "").trim();
+
+        if (ctrlNameStr) {
             displayHeaderTitle = ctrlNameStr;
         } else if (titleStr) {
             displayHeaderTitle = titleStr;
+        } else if (ctrlIdStr) {
+            displayHeaderTitle = ctrlIdStr;
         } else {
             displayHeaderTitle = "Audit Control";
+        }
+
+        if (ctrlIdStr && displayHeaderTitle && !displayHeaderTitle.toLowerCase().startsWith(ctrlIdStr.toLowerCase()) && !displayHeaderTitle.toLowerCase().includes(ctrlIdStr.toLowerCase())) {
+            displayHeaderTitle = `${ctrlIdStr} — ${displayHeaderTitle}`;
         }
 
         // Cleanups
         displayHeaderTitle = displayHeaderTitle.replace(/\s*\(\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s*\)\s*$/, '').trim();
         displayHeaderTitle = displayHeaderTitle.replace(/(\b[\w ]{5,}?)\s+\1/gi, '$1').trim();
+
+        // ── Clean Separation of Control Name and Audit Checklist Question ──
+        // If displayHeaderTitle contains ' — ', separate control title and audit question!
+        if (displayHeaderTitle.includes(" — ")) {
+            const parts = displayHeaderTitle.split(" — ");
+            if (parts.length > 1) {
+                displayHeaderTitle = parts[0].trim();
+                if (!auditQuestionSubtext) {
+                    auditQuestionSubtext = parts.slice(1).join(" — ").trim();
+                }
+            }
+        }
 
         const safeDoc = escapeHtml(singleDoc);
 
@@ -4688,20 +4804,15 @@ function renderFindingsList() {
 
         const isFp = backendFinalResult === "FALSE_POSITIVE" || String(f.status || "").toUpperCase() === "FALSE_POSITIVE";
 
-        const isPolReq = f.policy_required === true || f.policy_required === "true";
         const policyBadgeHtml = hasPolicyFields
-            ? (policyStatusVal === "NOT_REQUIRED" || (!isPolReq && policyStatusVal === "NOT_FOUND")
-                ? `<span class="badge badge-info" style="background:rgba(59,130,246,0.12); color:#3b82f6; border:1px solid rgba(59,130,246,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">ℹ Policy: Not Required</span>`
-                : (policyStatusVal === "NOT_FOUND"
-                    ? `<span class="badge badge-warning" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">⚠ Policy: Required — Not Found</span>`
-                    : (policyAssessVal === "COMPLIANT"
-                        ? `<span class="badge badge-success" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">✓ Policy Found: Compliant</span>`
-                        : `<span class="badge badge-danger" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">✕ Policy Found: Non-Compliant</span>`)))
-            : (!isPolReq
-                ? `<span class="badge badge-info" style="background:rgba(59,130,246,0.12); color:#3b82f6; border:1px solid rgba(59,130,246,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">ℹ Policy: Not Required</span>`
-                : (isComp
+            ? (policyStatusVal === "NOT_FOUND"
+                ? `<span class="badge badge-warning" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">⚠ Policy: Not Found</span>`
+                : (policyAssessVal === "COMPLIANT"
                     ? `<span class="badge badge-success" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">✓ Policy Found: Compliant</span>`
-                    : `<span class="badge badge-danger" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">⚠ Policy: Required — Not Found</span>`));
+                    : `<span class="badge badge-danger" style="background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">✕ Policy Found: Non-Compliant</span>`))
+            : (isComp
+                ? `<span class="badge badge-success" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">✓ Policy Found: Compliant</span>`
+                : `<span class="badge badge-warning" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">⚠ Policy: Not Found</span>`);
 
         const evidenceBadgeHtml = hasEvidenceFields
             ? (evidenceAssessVal === "COMPLIANT"
@@ -5022,6 +5133,277 @@ function renderFindingsList() {
                 }
             }
 
+
+
+        if (isVapt) {
+            let _target = f.target_host || f.host || f.ip || "";
+            let _cves = f.cves || f.cve_list || [];
+            if (typeof _cves === "string") {
+                _cves = _cves.split(",").map(s => s.trim()).filter(Boolean);
+            }
+            let _pluginId = f.plugin_id || "";
+            let _tool = f.tool || f.scanner || "";
+            let _cvssVec = f.cvss_vector || f.cvss || "";
+            const _poc = String(singleSnip || f.evidence_snippet || f.evidence || "").trim();
+            const _desc = String(getCleanFindingDescription(f)).trim();
+            const _remed = String(getCleanRecommendation(f)).trim();
+            const _riskCategory = String(f.category || "").trim();
+            const _ciaImpact = String(f.cia_impact || "").trim();
+            const _isPii = !!f.is_pii_exposed;
+            const _remedActionable = String(f.remediation_actionable || f.actionable_remediation || "").trim();
+
+            // PQC (Post-Quantum Cryptography Readiness) extra fields -- empty for
+            // plain VAPT findings, only populated when this session was PQC-scanned.
+            const isPqc = isPqcFinding(f);
+            const _quantumStatus = String(f.quantum_status || "").trim().toUpperCase();
+            const _assetName = String(f.asset_name || "").trim();
+            const _assetCat = String(f.asset_category || f.assetCategory || "").trim();
+            const _caAlgo = String(f.ca_algorithm || "").trim();
+            const _keyAlgo = String(f.key_algorithm || "").trim();
+            const _protocolVer = String(f.protocol_version || "").trim();
+            const _exposureCtx = String(f.exposure_context || "").trim();
+            const _pqcPort = String(f.port || "").trim();
+            const _pqcEnv = String(f.environment || "").trim();
+            const _riskScore = (f.risk_score === null || f.risk_score === undefined || f.risk_score === "") ? null : Number(f.risk_score);
+            const _riskBand = String(f.risk_band || "").trim().toUpperCase();
+            const _businessPriority = String(f.business_priority || "").trim();
+            const _oemProduct = String(f.oem_product || "").trim();
+            const _oemReadiness = String(f.oem_readiness_status || "").trim();
+            const _migrationDepFlag = !!f.migration_dependency_flag;
+            const _dependencyChain = String(f.dependency_chain || "").trim();
+
+            if (_poc) {
+                if (!_target) {
+                    const m = _poc.match(/Target Host:\s*(.+)/);
+                    if (m) _target = m[1].trim();
+                }
+            }
+            if (!_cves.length) {
+                const extracted = (_poc + " " + _desc).match(/CVE-\d{4}-\d{4,7}/gi);
+                if (extracted) {
+                    _cves = Array.from(new Set(extracted.map(c => c.toUpperCase())));
+                }
+            }
+
+            if (!_tool) _tool = "Scanner";
+
+            let _cleanPoc = formatStructuredPoc(_poc);
+
+            const cveBadges = _cves.length
+                ? _cves.map(cve => `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(cve)}" target="_blank"
+                    style="font-size:0.72rem; padding:2px 7px; border-radius:4px;
+                           background:rgba(239,68,68,0.12); color:#f87171;
+                           border:1px solid rgba(239,68,68,0.3); font-weight:700;
+                           text-decoration:none; margin-right:4px;" title="View on NVD">${escapeHtml(cve)} ↗</a>`).join("")
+                : `<span style="font-size:0.74rem; padding:2px 8px; border-radius:4px; background:rgba(148,163,184,0.12); color:var(--text-muted); border:1px solid rgba(148,163,184,0.25); font-weight:600;">N/A — Vendor Security Advisory / End-of-Life Notice</span>`;
+
+            let vectorHint = "";
+            if (_cvssVec) {
+                const isNetwork = _cvssVec.includes("AV:N");
+                const noAuth = _cvssVec.includes("PR:N");
+                const noUI = _cvssVec.includes("UI:N");
+                const hints = [];
+                if (isNetwork) hints.push("🌐 Exploitable Remotely");
+                if (noAuth) hints.push("🔓 No Auth Required");
+                if (noUI) hints.push("👤 No User Interaction");
+                vectorHint = hints.length
+                    ? `<span style="font-size:0.72rem; color:#fbbf24; margin-left:8px;">${hints.join(" · ")}</span>`
+                    : "";
+            }
+
+            // Determine OWASP Top 10 Category
+            let owaspCat = f.owasp_category || f.owasp_top_10 || "";
+            if (!owaspCat) {
+                const combined = `${f.control_name || ''} ${f.title || ''} ${safeCtrlId} ${_desc} ${_poc}`.toLowerCase();
+                if (combined.includes("xss") || combined.includes("sqli") || combined.includes("injection")) owaspCat = "A03:2021 Injection";
+                else if (combined.includes("access control") || combined.includes("traversal") || combined.includes("idor") || combined.includes("cors")) owaspCat = "A01:2021 Broken Access Control";
+                else if (combined.includes("ssl") || combined.includes("tls") || combined.includes("cipher") || combined.includes("hsts") || combined.includes("crypto")) owaspCat = "A02:2021 Cryptographic Failures";
+                else if (combined.includes("end of life") || combined.includes("eol") || combined.includes("outdated") || combined.includes("unmaintained") || combined.includes("seol") || combined.includes("unpatched")) owaspCat = "A06:2021 Vulnerable and Outdated Components";
+                else if (combined.includes("auth") || combined.includes("password") || combined.includes("token") || combined.includes("session")) owaspCat = "A07:2021 Identification & Auth Failures";
+                else if (combined.includes("ssrf")) owaspCat = "A10:2021 Server-Side Request Forgery (SSRF)";
+                else owaspCat = "A05:2021 Security Misconfiguration";
+            }
+
+            const sevText = f.severity || "N/A";
+            let sevBadgeHtml = "";
+            const sUpper = sevText.toUpperCase();
+            if (isPqc) {
+                if (sUpper.includes("CRITICAL") || sUpper.includes("P1")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(239,68,68,0.2); color:#ef4444; border:1px solid rgba(239,68,68,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🔴 P1 Critical</span>`;
+                } else if (sUpper.includes("HIGH") || sUpper.includes("P2")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(249,115,22,0.2); color:#f97316; border:1px solid rgba(249,115,22,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🟠 P2 High</span>`;
+                } else if (sUpper.includes("MEDIUM") || sUpper.includes("P3")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(245,158,11,0.2); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🟡 P3 Medium</span>`;
+                } else {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.2); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🔵 P4 Low</span>`;
+                }
+            } else {
+                const _score = Number(f.severity_score);
+                const _band = sUpper.includes("CRITICAL") || sUpper.includes("P1") ? 9.8
+                            : sUpper.includes("HIGH") || sUpper.includes("P2") ? 7.5
+                            : sUpper.includes("MEDIUM") || sUpper.includes("P3") ? 5.3 : 2.5;
+                const _cvss = (Number.isFinite(_score) && _score > 0) ? _score.toFixed(1) : _band.toFixed(1);
+                if (sUpper.includes("CRITICAL") || sUpper.includes("P1")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(239,68,68,0.2); color:#ef4444; border:1px solid rgba(239,68,68,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🔴 P1 Critical (CVSS ${_cvss})</span>`;
+                } else if (sUpper.includes("HIGH") || sUpper.includes("P2")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(249,115,22,0.2); color:#f97316; border:1px solid rgba(249,115,22,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🟠 P2 High (CVSS ${_cvss})</span>`;
+                } else if (sUpper.includes("MEDIUM") || sUpper.includes("P3")) {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(245,158,11,0.2); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🟡 P3 Medium (CVSS ${_cvss})</span>`;
+                } else {
+                    sevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.2); color:#3b82f6; border:1px solid rgba(59,130,246,0.4); font-weight:800; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🔵 P4 Low (CVSS ${_cvss})</span>`;
+                }
+            }
+
+            const isPiiHigh = _isPii;
+            const piiColor = isPiiHigh ? "#ef4444" : "#10b981";
+            const piiIcon = isPiiHigh ? "🔒" : "🛡️";
+            const piiText = isPiiHigh ? "Confidential (PII Data Present)" : "Non-PII (Standard System Log)";
+
+            const _bandColor = (band) => band === "CRITICAL" ? "#ef4444"
+                : band === "HIGH" ? "#f97316"
+                    : band === "MEDIUM" ? "#f59e0b"
+                        : band === "LOW" ? "#10b981"
+                            : "#94a3b8";
+
+            card.innerHTML = `
+                <div class="finding-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(148,163,184,0.15); padding-bottom:10px; margin-bottom:12px;">
+                    <h3 style="margin:0; font-size:1.05rem; font-weight:700; color:var(--text-primary);">${escapeHtml(displayHeaderTitle)}</h3>
+                    <div class="badge-group" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                        <span class="badge" style="background:rgba(147,51,234,0.15); color:#a855f7; border:1px solid rgba(147,51,234,0.3); font-weight:700; padding:3px 8px; border-radius:4px; font-size:0.75rem;">🛡️ OWASP: ${escapeHtml(owaspCat)}</span>
+                        ${sevBadgeHtml}
+                        ${mainBadgeHtml}
+                    </div>
+                </div>
+
+                <div class="finding-body">
+                    <div style="display:flex; gap:16px; margin-bottom:12px; font-size:0.8rem; background:rgba(15,23,42,0.4); padding:8px 12px; border-radius:6px; border:1px solid rgba(148,163,184,0.1); flex-wrap:wrap; align-items:center;">
+                        ${_target ? `<div><span style="color:#94a3b8;">Target Host:</span> <span style="font-family:monospace; color:#38bdf8; font-weight:700;">${escapeHtml(_target)}</span></div>` : ""}
+                        ${_pluginId ? `<div><span style="color:#94a3b8;">Scanner Plugin:</span> <span style="font-family:monospace; color:#a78bfa;">ID #${escapeHtml(_pluginId)}</span></div>` : ""}
+                        ${_riskCategory ? `<div><span style="color:#94a3b8;">Risk Category:</span> <span style="color:#f59e0b; font-weight:700;">${escapeHtml(_riskCategory)}</span></div>` : ""}
+                        ${_ciaImpact ? `<div><span style="color:#94a3b8;">CIA Impact:</span> <span style="color:#a78bfa; font-weight:700;">${escapeHtml(_ciaImpact)}</span></div>` : ""}
+                        <div><span style="color:${piiColor}; font-weight:700;">${piiIcon} ${escapeHtml(piiText)}</span></div>
+                    </div>
+
+                    ${isPqc ? (() => {
+                        const _qsColor = _quantumStatus === "SAFE" ? "#10b981"
+                            : _quantumStatus === "WEAK" ? "#f59e0b"
+                                : _quantumStatus === "VULNERABLE" ? "#ef4444"
+                                    : "#94a3b8";
+                        const _pqcExtras = [
+                            _caAlgo ? `CA Algorithm: ${escapeHtml(_caAlgo)}` : "",
+                            _keyAlgo ? `Key Algorithm: ${escapeHtml(_keyAlgo)}` : "",
+                            _protocolVer ? `Protocol: ${escapeHtml(_protocolVer)}` : "",
+                            _pqcPort ? `Port: ${escapeHtml(_pqcPort)}` : "",
+                            _pqcEnv ? `Environment: ${escapeHtml(_pqcEnv)}` : "",
+                        ].filter(Boolean).join(" &nbsp;·&nbsp; ");
+
+                        const _avBadge = _exposureCtx ? (() => {
+                            const isExt = _exposureCtx.toUpperCase() === "EXTERNAL";
+                            const isInt = _exposureCtx.toUpperCase() === "INTERNAL";
+                            const avColor = isExt ? "#ef4444" : isInt ? "#f59e0b" : "#94a3b8";
+                            const avIcon = isExt ? "🌐" : isInt ? "🏠" : "❓";
+                            const avLabel = isExt ? "External (Internet-facing)"
+                                : isInt ? "Internal (LAN / On-prem)" : _exposureCtx;
+                            const hndlLabel = isExt
+                                ? "Nation-state harvest-now-decrypt-later threat"
+                                : isInt
+                                    ? "Insider / compromised-host threat (network access required)"
+                                    : "";
+                            return `<p style="margin:6px 0 0 0; font-size:0.78rem;">
+                                    <span style="font-weight:700; color:${avColor};">${avIcon} Attack Vector:</span>
+                                    <span style="font-size:0.75rem; padding:2px 8px; border-radius:4px; background:${avColor}22; color:${avColor}; border:1px solid ${avColor}66; font-weight:700; margin-left:4px;">${escapeHtml(avLabel)}</span>
+                                    ${hndlLabel ? `<span style="font-size:0.72rem; color:var(--text-muted); margin-left:6px;">${escapeHtml(hndlLabel)}</span>` : ""}
+                                </p>`;
+                        })() : "";
+
+                        const _riskColor = _bandColor(_riskBand);
+                        const _bpColor = _bandColor(_businessPriority.toUpperCase());
+                        return `
+                        <div class="finding-detail-row" style="border-left: 3px solid ${_qsColor}; padding-left: 10px; margin-bottom: 10px;">
+                            <label style="font-weight:700; font-size:0.78rem; color:${_qsColor}; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">🔐 Quantum Readiness</label>
+                            <span style="font-size:0.78rem; padding:3px 9px; border-radius:6px; background:${_qsColor}22; color:${_qsColor}; border:1px solid ${_qsColor}66; font-weight:800;">${escapeHtml(_quantumStatus)}</span>
+                            ${_assetCat ? `<span style="font-size:0.75rem; padding:3px 8px; border-radius:6px; background:rgba(59,130,246,0.12); color:#3b82f6; border:1px solid rgba(59,130,246,0.3); font-weight:700; margin-left:6px;">${escapeHtml(_assetCat)}</span>` : ""}
+                            ${_assetName ? `<span style="font-size:0.82rem; color:var(--text-primary); font-weight:700; margin-left:10px;">Asset: ${escapeHtml(_assetName)}</span>` : ""}
+                            ${_pqcExtras ? `<p style="margin:6px 0 0 0; font-size:0.76rem; color:var(--text-muted); line-height:1.5;">${_pqcExtras}</p>` : ""}
+                            ${_avBadge}
+                            ${(_riskScore !== null && !isNaN(_riskScore)) ? `<p style="margin:6px 0 0 0; font-size:0.78rem;"><span style="font-weight:700; color:${_riskColor};">Risk Score: ${escapeHtml(String(_riskScore))}/100${_riskBand ? ` (${escapeHtml(_riskBand)})` : ""}</span></p>` : ""}
+                            ${_businessPriority ? `<p style="margin:4px 0 0 0; font-size:0.78rem;"><span style="font-weight:700; color:${_bpColor};">Business Priority: ${escapeHtml(_businessPriority)}</span></p>` : ""}
+                            ${_oemProduct ? `<p style="margin:4px 0 0 0; font-size:0.78rem; color:var(--text-primary);"><span style="font-weight:700;">OEM Product / Readiness:</span> ${escapeHtml(_oemProduct)}${_oemReadiness ? `: ${escapeHtml(_oemReadiness)}` : ""}</p>` : ""}
+                            ${_migrationDepFlag ? `<p style="margin:6px 0 0 0; font-size:0.78rem; color:#ef4444; font-weight:700;">⚠ Migration Dependency: downstream system also quantum-vulnerable</p>${_dependencyChain ? `<p style="margin:2px 0 0 0; font-size:0.76rem; color:var(--text-muted);">${escapeHtml(_dependencyChain)}</p>` : ""}` : ""}
+                        </div>`;
+                    })() : ""}
+
+                    <div class="finding-detail-row" style="margin-bottom: 10px;">
+                        <label style="font-weight:700; font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">🔴 CVE References (click to view on NVD)</label>
+                        <div style="margin-top: 4px;">${cveBadges}</div>
+                    </div>
+
+                    ${_cvssVec && !isPqc ? `
+                    <div class="finding-detail-row" style="margin-bottom: 10px;">
+                        <label style="font-weight:700; font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">📊 CVSS Vector</label>
+                        <p style="font-family: monospace; font-size: 0.82rem; color: #a78bfa; margin: 2px 0;">
+                            ${escapeHtml(_cvssVec)} ${vectorHint}
+                        </p>
+                    </div>` : ""}
+
+                    <div class="finding-detail-row" style="margin-bottom: 12px;">
+                        <label style="font-weight:700; font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">📄 Vulnerability Description</label>
+                        <p style="margin:0; font-size:0.86rem; color:var(--text-primary); line-height:1.5;">${escapeHtml(_desc)}</p>
+                    </div>
+
+                    ${_cleanPoc ? `
+                    <div class="finding-detail-row" style="margin-bottom: 12px;">
+                        <label style="font-weight:700; font-size:0.78rem; color:#10b981; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">📋 Proof of Concept (Scanner Plugin Output)</label>
+                        <pre class="finding-snippet" style="margin:0; font-family:'Consolas','Fira Code',monospace; font-size:0.78rem; color:#064e3b; background:rgba(16,185,129,0.08); padding:10px 12px; border-radius:8px; border:1px solid rgba(16,185,129,0.25); line-height:1.45; max-height:240px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-weight:600;">${escapeHtml(_cleanPoc)}</pre>
+                    </div>` : ""}
+
+                    <div class="finding-detail-row" style="margin-bottom: 12px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                            <label style="font-weight:700; font-size:0.78rem; color:#3b82f6; text-transform:uppercase; letter-spacing:0.5px;">🔧 Recommended Remediation & Action</label>
+                            <button type="button" onclick="navigator.clipboard.writeText('${safeRemedForClick}'); showToastBanner('Remediation script copied to clipboard!');" style="padding:2px 8px; font-size:0.72rem; border-radius:4px; border:1px solid rgba(59,130,246,0.4); background:rgba(59,130,246,0.1); color:#3b82f6; font-weight:700; cursor:pointer;">📋 Copy Fix Command</button>
+                        </div>
+                        <div style="margin:0;">${formatRemediationSteps(_remed, '#2563eb')}</div>
+                    </div>
+
+                    ${(_remedActionable && _remedActionable !== _remed) ? `
+                    <div class="finding-detail-row" style="margin-bottom: 12px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                            <label style="font-weight:700; font-size:0.78rem; color:#10b981; text-transform:uppercase; letter-spacing:0.5px;">👨‍💻 Developer Actionable Mitigation Steps</label>
+                            <button type="button" onclick="navigator.clipboard.writeText('${escapeHtml(_remedActionable).replace(/'/g, "\\'")}'); showToastBanner('Mitigation steps copied to clipboard!');" style="padding:2px 8px; font-size:0.72rem; border-radius:4px; border:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.1); color:#10b981; font-weight:700; cursor:pointer;">📋 Copy Steps</button>
+                        </div>
+                        <div style="margin:0;">${formatRemediationSteps(_remedActionable, '#059669')}</div>
+                    </div>` : ""}
+
+                    <div class="finding-actions" style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; padding-top:10px; border-top:1px solid rgba(148,163,184,0.15);">
+                        <div style="font-size:0.78rem; color:#2563eb; font-weight:600; display:flex; align-items:center; gap:6px;">
+                            <span>📁 Scan File: <i style="color:var(--text-muted); font-weight:400; font-style:italic;">${safeDoc}</i></span>
+                        </div>
+                        <div class="btn-card-group" style="display:flex; gap:8px;">
+                            <button class="btn-secondary" style="color:#10b981; font-weight:700; border-color:rgba(16,185,129,0.4); padding:4px 12px; border-radius:5px; cursor:pointer;" onclick="updateFindingWorkflowStatus(${f.id}, 'Accepted')">✓ Accept</button>
+                            <button class="btn-secondary" style="color:#3b82f6; font-weight:700; border-color:rgba(59,130,246,0.4); padding:4px 12px; border-radius:5px; cursor:pointer;" onclick='openEditFindingModal(${findingJsonStr})'>✏️ Modify</button>
+                            <button class="btn-danger" style="font-weight:700; padding:4px 12px; border-radius:5px; cursor:pointer;" onclick="rejectSingleDocCard(${f.id}, '${safeDocForClick}', '${safeCtrlId}')">✕ Reject</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            // ── NIST / ISO Severity badge (P1–P4 scale) — only for non-compliant findings ──
+            let nistSevBadgeHtml = "";
+            if (!isComp && !isFp) {
+                const rawSev = String(f.severity || "").trim().toUpperCase();
+                if (rawSev.includes("P1") || rawSev.includes("CRITICAL")) {
+                    nistSevBadgeHtml = `<span class="badge" style="background:rgba(239,68,68,0.18); color:#ef4444; border:1px solid rgba(239,68,68,0.45); font-weight:800; padding:3px 9px; border-radius:4px; font-size:0.75rem;">🔴 P1 Critical</span>`;
+                } else if (rawSev.includes("P2") || rawSev.includes("HIGH")) {
+                    nistSevBadgeHtml = `<span class="badge" style="background:rgba(249,115,22,0.18); color:#f97316; border:1px solid rgba(249,115,22,0.45); font-weight:800; padding:3px 9px; border-radius:4px; font-size:0.75rem;">🟠 P2 High</span>`;
+                } else if (rawSev.includes("P3") || rawSev.includes("MEDIUM")) {
+                    nistSevBadgeHtml = `<span class="badge" style="background:rgba(245,158,11,0.18); color:#f59e0b; border:1px solid rgba(245,158,11,0.45); font-weight:800; padding:3px 9px; border-radius:4px; font-size:0.75rem;">🟡 P3 Medium</span>`;
+                } else if (rawSev.includes("P4") || rawSev.includes("LOW")) {
+                    nistSevBadgeHtml = `<span class="badge" style="background:rgba(59,130,246,0.18); color:#3b82f6; border:1px solid rgba(59,130,246,0.45); font-weight:800; padding:3px 9px; border-radius:4px; font-size:0.75rem;">🔵 P4 Low</span>`;
+                } else if (rawSev && rawSev !== "N/A" && rawSev !== "NIL") {
+                    nistSevBadgeHtml = `<span class="badge" style="background:rgba(148,163,184,0.18); color:#94a3b8; border:1px solid rgba(148,163,184,0.35); font-weight:800; padding:3px 9px; border-radius:4px; font-size:0.75rem;">⚪ ${escapeHtml(f.severity)}</span>`;
+                }
+            }
+
             card.innerHTML = `
                 <div class="finding-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(148,163,184,0.15); padding-bottom:10px; margin-bottom:12px;">
                     <h3 style="margin:0; font-size:1.05rem; font-weight:700; color:var(--text-primary);">${escapeHtml(displayHeaderTitle)}</h3>
@@ -5034,12 +5416,13 @@ function renderFindingsList() {
                 </div>
 
                 <div class="finding-body">
+                    ${buildRequirementQuestionHtml(f)}
+
                     <div class="finding-detail-row" style="margin-bottom: 12px;">
                         <label style="font-weight:700; font-size:0.78rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:4px;">FINDING DESCRIPTION</label>
                         <p style="margin:0; font-size:0.86rem; color:var(--text-primary); line-height:1.5;">${escapeHtml(getCleanFindingDescription(f))}</p>
                     </div>
 
-                    ${buildRequirementQuestionHtml(f)}
                     ${buildRequirementsCoveragePanelHtml(f)}
 
                     <div class="finding-detail-row" style="margin-bottom: 12px;">
@@ -5063,6 +5446,7 @@ function renderFindingsList() {
                     </div>
                 </div>
             `;
+        }
         }
         container.appendChild(card);
     });
@@ -5097,39 +5481,21 @@ function renderFindingsList() {
 }
 
 async function rejectSingleDocCard(findingId, docName, controlId) {
-    const reason = prompt(`Reason for rejecting '${docName}' for Control ${controlId} (Optional):
-(e.g., "File is NTP clock sync, not Access Control proof")`, "");
-    if (reason === null) return; // Cancelled
+    const reason = prompt(`Reason for rejecting finding / document (Optional):\n(e.g., "Evidence document is insufficient or irrelevant")`, "");
+    if (reason === null) return; // Cancelled by user
 
     try {
-        const response = await authFetch(`${API_BASE}/audit/findings/${findingId}/reject-doc`, {
+        const reqDoc = (docName && docName !== "N/A" && !docName.includes("14 files")) ? docName : "Evidence Document";
+        await authFetch(`${API_BASE}/audit/findings/${findingId}/reject-doc`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ doc_name: docName, control_id: controlId, reason: reason || "" })
+            body: JSON.stringify({ doc_name: reqDoc, control_id: controlId || "", reason: reason || "" })
         });
-        const data = await response.json();
-        if (data.success) {
-            showToast(`Card for '${docName}' rejected.`, "info");
-            const idx = findingsList.findIndex(f => f.id === findingId);
-            if (idx !== -1) {
-                const remaining = (findingsList[idx].source_files || '')
-                    .split(',')
-                    .map(s => s.trim())
-                    .filter(s => s && s !== docName);
-                if (remaining.length === 0) {
-                    findingsList[idx].status = "Rejected";
-                } else {
-                    findingsList[idx].source_files = remaining.join(', ');
-                }
-            }
-            renderFindingsList();
-            calculateSeverityStats();
-        } else {
-            alert('Failed to reject card: ' + (data.detail || 'Unknown error'));
-        }
-    } catch (err) {
-        alert('Failed to reject card: ' + err.message);
+    } catch (e) {
+        console.warn("[REJECT DOC WARNING]", e);
     }
+    // Always commit finding status to 'Rejected'
+    await updateFindingWorkflowStatus(findingId, "Rejected");
 }
 
 async function restoreFindingCard(findingId) {
@@ -5157,18 +5523,24 @@ async function updateFindingWorkflowStatus(id, status) {
         const response = await authFetch(`${API_BASE}/audit/findings/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status })
+            body: JSON.stringify({ status: status })
         });
         const data = await response.json();
         if (data.success) {
-            // Hot reload local list
+            showToast(`Finding status updated to '${status}'.`, "success");
             const idx = findingsList.findIndex(f => f.id === id);
-            if (idx !== -1) findingsList[idx].status = status;
+            if (idx !== -1) {
+                findingsList[idx].status = status;
+                findingsList[idx].is_saved_to_shakthi = true;
+                findingsList[idx].human_verified = true;
+            }
             renderFindingsList();
             calculateSeverityStats();
+        } else {
+            alert("Failed to update status: " + (data.detail || "Unknown error"));
         }
     } catch (err) {
-        alert(err.message);
+        alert("Status update error: " + err.message);
     }
 }
 
@@ -7149,7 +7521,7 @@ async function sendCopilotMessage() {
 
     if (indicator) indicator.style.display = "block";
 
-    const selectedModel = document.getElementById("llm-model-select")?.value || "Gemma 4 (e4b)";
+    const selectedModel = document.getElementById("llm-model-select")?.value || "Gemma 4 (12b)";
     const uName = currentUser ? currentUser.username : "auditor";
 
     try {
@@ -8186,4 +8558,99 @@ async function undoDeleteEvidenceFile(sessionId, fileId, filename) {
     } catch (err) {
         console.error("Error undoing evidence deletion:", err);
     }
+}
+
+// ─── RESIZABLE SIDEBAR WITH DRAG HANDLE ────────────────────────────────────────
+function initResizableSidebar() {
+    const sidebar = document.getElementById("main-sidebar");
+    const resizer = document.getElementById("sidebar-resizer");
+    if (!sidebar || !resizer) return;
+    if (resizer.dataset.initialized === "true") return;
+    resizer.dataset.initialized = "true";
+
+    const MIN_WIDTH = 240;
+    const MAX_WIDTH = 650;
+    const STORAGE_KEY = "audit_box_sidebar_width";
+
+    // 1. Restore saved width from localStorage immediately
+    const savedWidth = localStorage.getItem(STORAGE_KEY);
+    if (savedWidth) {
+        const parsed = parseInt(savedWidth, 10);
+        if (!isNaN(parsed) && parsed >= MIN_WIDTH && parsed <= MAX_WIDTH) {
+            sidebar.style.width = parsed + "px";
+        }
+    }
+
+    let isResizing = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    function startResize(clientX) {
+        isResizing = true;
+        startX = clientX;
+        startWidth = sidebar.getBoundingClientRect().width;
+
+        document.body.classList.add("is-resizing");
+        resizer.classList.add("is-dragging");
+    }
+
+    function doResize(clientX) {
+        if (!isResizing) return;
+        const dx = clientX - startX;
+        let newWidth = startWidth + dx;
+        const maxDynamicWidth = Math.min(MAX_WIDTH, Math.floor(window.innerWidth * 0.55));
+
+        if (newWidth < MIN_WIDTH) newWidth = MIN_WIDTH;
+        if (newWidth > maxDynamicWidth) newWidth = maxDynamicWidth;
+
+        sidebar.style.width = newWidth + "px";
+    }
+
+    function stopResize() {
+        if (!isResizing) return;
+        isResizing = false;
+        document.body.classList.remove("is-resizing");
+        resizer.classList.remove("is-dragging");
+
+        const finalWidth = sidebar.getBoundingClientRect().width;
+        localStorage.setItem(STORAGE_KEY, Math.round(finalWidth));
+    }
+
+    // Mouse Events
+    resizer.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        startResize(e.clientX);
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (isResizing) {
+            e.preventDefault();
+            doResize(e.clientX);
+        }
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (isResizing) {
+            stopResize();
+        }
+    });
+
+    // Touch Events for Mobile / Tablet drag
+    resizer.addEventListener("touchstart", (e) => {
+        if (e.touches.length === 1) {
+            startResize(e.touches[0].clientX);
+        }
+    }, { passive: true });
+
+    document.addEventListener("touchmove", (e) => {
+        if (isResizing && e.touches.length === 1) {
+            doResize(e.touches[0].clientX);
+        }
+    }, { passive: true });
+
+    document.addEventListener("touchend", () => {
+        if (isResizing) {
+            stopResize();
+        }
+    });
 }

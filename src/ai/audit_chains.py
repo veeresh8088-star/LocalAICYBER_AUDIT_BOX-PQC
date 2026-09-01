@@ -272,7 +272,7 @@ You MUST respond with findings wrapped in XML tags matching this format:
 <evidence_count>integer</evidence_count>
 <business_impact>business impact of identified gaps, or empty if COMPLIANT</business_impact>
 <remediation_priority>Low | Medium | High | Immediate</remediation_priority>
-<justification>Detailed auditor explanation supported by evidence.</justification>
+<justification>Analytical auditor reasoning — do NOT dump unorganized raw OCR lines, directory listings, or raw PDF text blocks. You MUST: (1) analyze the document text and OCR evidence, (2) synthesize the exact facts present into a clean, well-structured, factual answer that directly addresses the audit requirement, (3) explain HOW each identified fact satisfies or does not satisfy the control requirement, (4) state clearly what is missing if the control is not fully satisfied, and (5) ensure every factual claim is strictly traceable to the submitted document. Write this as a clear, professional, structured audit judgment a senior lead auditor would deliver.</justification>
 <missing_requirements>
   <requirement>Requirement 1</requirement>
   <requirement>Requirement 2</requirement>
@@ -441,7 +441,7 @@ You MUST respond with findings wrapped in XML tags matching this format:
 <evidence_count>integer</evidence_count>
 <business_impact>business impact of identified gaps, or empty if COMPLIANT</business_impact>
 <remediation_priority>Low | Medium | High | Immediate</remediation_priority>
-<justification>Detailed auditor explanation supported by evidence.</justification>
+<justification>Analytical auditor reasoning — do NOT dump unorganized raw OCR lines, directory listings, or raw PDF text blocks. You MUST: (1) analyze the document text and OCR evidence, (2) synthesize the exact facts present into a clean, well-structured, factual answer that directly addresses the audit requirement, (3) explain HOW each identified fact satisfies or does not satisfy the control requirement, (4) state clearly what is missing if the control is not fully satisfied, and (5) ensure every factual claim is strictly traceable to the submitted document. Write this as a clear, professional, structured audit judgment a senior lead auditor would deliver.</justification>
 <missing_requirements>
   <requirement>Requirement 1</requirement>
   <requirement>Requirement 2</requirement>
@@ -818,7 +818,7 @@ You MUST respond with findings wrapped in XML tags matching this format:
 <evidence_count>integer</evidence_count>
 <business_impact>business impact of identified gaps, or empty if COMPLIANT</business_impact>
 <remediation_priority>Low | Medium | High | Immediate</remediation_priority>
-<justification>Detailed auditor explanation supported by evidence.</justification>
+<justification>Analytical auditor reasoning — do NOT dump unorganized raw OCR lines, directory listings, or raw PDF text blocks. You MUST: (1) analyze the document text and OCR evidence, (2) synthesize the exact facts present into a clean, well-structured, factual answer that directly addresses the audit requirement, (3) explain HOW each identified fact satisfies or does not satisfy the control requirement, (4) state clearly what is missing if the control is not fully satisfied, and (5) ensure every factual claim is strictly traceable to the submitted document. Write this as a clear, professional, structured audit judgment a senior lead auditor would deliver.</justification>
 <missing_requirements>
   <requirement>Requirement 1</requirement>
   <requirement>Requirement 2</requirement>

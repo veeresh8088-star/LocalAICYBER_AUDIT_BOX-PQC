@@ -2165,19 +2165,21 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             evidence_items = [it for it in evidence_items if it.artifact_id not in pol_ids]
             overlap_ids = []
 
-        # Populate policy_snippet ONLY from policy_items or valid requirement snippet
-        if policy_items:
+        # Populate policy_snippet from policy_items, raw_policy_snip, or policy_quote
+        if policy_items and any(it.extracted_text for it in policy_items if it.extracted_text):
             finding["policy_snippet"] = "\n\n".join([it.extracted_text for it in policy_items if it.extracted_text])
         elif raw_policy_snip:
             finding["policy_snippet"] = raw_policy_snip
         else:
-            finding["policy_snippet"] = ""
+            raw_pol = str(finding.get("policy_quote") or finding.get("policy_excerpt") or "").strip()
+            finding["policy_snippet"] = raw_pol if raw_pol.upper() not in ("NOT_FOUND", "N/A", "NONE") else ""
 
-        # Populate operational_evidence_snippet ONLY from evidence_items
-        if evidence_items:
+        # Populate operational_evidence_snippet from evidence_items, evidence_snippet, or evidence_quote
+        if evidence_items and any(it.extracted_text for it in evidence_items if it.extracted_text):
             finding["operational_evidence_snippet"] = "\n\n".join([it.extracted_text for it in evidence_items if it.extracted_text])
         else:
-            finding["operational_evidence_snippet"] = ""
+            raw_ev = str(finding.get("evidence_snippet") or finding.get("evidence_quote") or finding.get("excerpt") or "").strip()
+            finding["operational_evidence_snippet"] = raw_ev if raw_ev.upper() not in ("NOT_FOUND", "N/A", "NONE") else ""
 
         conflict_detected = False
         conflict_notes = []
@@ -2528,7 +2530,7 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             for cov in coverage_list
         ) if coverage_list else False
 
-        # Canonical Policy State Machine (Descriptive Metadata Track Only — NEVER mutates final_status)
+        # Canonical Policy State Machine (Strict 2-State System: FOUND / NOT_FOUND, COMPLIANT / NON_COMPLIANT)
         raw_pol_assess = str(finding.get("policy_assessment") or "").strip().upper()
         if policy_items:
             policy_status = "FOUND"
@@ -2539,46 +2541,10 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             else:
                 policy_assessment = "COMPLIANT"
                 pol_present = "Compliant"
-        elif policy_required:
+        else:
             policy_status = "NOT_FOUND"
             policy_assessment = "NON_COMPLIANT"
             pol_present = "Not Found"
-        else:
-            policy_status = "NOT_REQUIRED"
-            policy_assessment = "NOT_APPLICABLE"
-            pol_present = "Not Required"
-
-        # Only overwrite policy_gap with the "not required" message in the genuine
-        # NOT_REQUIRED case (no policy needed AND none was found) -- this used to
-        # fire on `not policy_required` alone, which also matched the FOUND branch
-        # above whenever derive_policy_required() defaulted to False for a control
-        # whose requirement text doesn't literally say "policy" (e.g. "7.2 Physical
-        # Entry"). That produced a self-contradicting finding: policy_status=FOUND
-        # (a real policy document was located and used) next to a policy_gap saying
-        # "policy is not required for this requirement" -- confusing regardless of
-        # which of the two a reader trusts.
-        if policy_status == "NOT_REQUIRED":
-            finding["policy_gap"] = "Not applicable — policy is not required for this requirement."
-            # ...and reconcile the text that was already written on the assumption
-            # a policy WAS required.
-            #
-            # gap_description and recommendation are both built far earlier in
-            # post_process, from the LLM's own policy_status. This block is where
-            # the deterministic layer overrules that to NOT_REQUIRED -- so without
-            # this, a finding ships reading:
-            #
-            #     Policy: Not Required
-            #     Missing Requirements: A documented policy defining the retention
-            #                           period and archival procedure for logs.
-            #
-            # Both halves of one finding, flatly contradicting each other. Observed
-            # on real output for 5.33 Protection of Records and 8.6 Capacity
-            # Management. The verdict may still be correct; the stated REASON is
-            # not, and an auditee reading the exported report spots it immediately.
-            finding["gap_description"] = _drop_policy_demands(
-                finding.get("gap_description"), control_id)
-            finding["recommendation"] = _rewrite_policy_recommendation(
-                finding.get("recommendation"), control_id)
 
         if not evidence_items:
             evidence_status = "NOT_FOUND"
@@ -2601,11 +2567,16 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
         policy_valid_ok = policy_validity in ("CURRENT", "UNKNOWN")
         evidence_fresh_ok = evidence_freshness in ("CURRENT", "UNKNOWN")
 
-        # Mandatory Atomic Requirement Authority: Overall COMPLIANT only when
-        # every mandatory atomic requirement is SUPPORTED, no requirement is PARTIAL or NOT_SUPPORTED,
-        # and no unresolved conflict exists.
+        # Strict Dual Compliance Rule:
+        # COMPLIANT ONLY when BOTH policy (FOUND + COMPLIANT) AND evidence (FOUND + COMPLIANT) pass,
+        # plus valid dates, no contradictions, and full atomic coverage.
+        policy_ok = (policy_status == "FOUND" and policy_assessment == "COMPLIANT")
+        evidence_ok = (evidence_status == "FOUND" and evidence_assessment == "COMPLIANT")
+
         is_compliant = (
-            req_supported_cnt == req_total
+            policy_ok
+            and evidence_ok
+            and req_supported_cnt == req_total
             and req_partial_cnt == 0
             and req_not_supported_cnt == 0
             and not conflict_detected
@@ -2638,8 +2609,9 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
 
         if is_compliant:
             finding["severity"] = "N/A"
-            if finding.get("reasoning"):
-                finding["description"] = finding["reasoning"]
+            _basis = str(finding.get("justification") or finding.get("reasoning") or "").strip()
+            if _basis:
+                finding["description"] = _basis
             finding["recommendation"] = finding.get("recommendation") or "No action required. Continue to maintain current procedures and ensure periodic review of compliance evidence."
         else:
             cid = finding.get("control_id") or ""
@@ -2659,10 +2631,8 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             # Separate presence mapping for policy and evidence
             if pol_found:
                 finding["policy_present"] = "Compliant" if policy_assessment == "COMPLIANT" else "Found"
-            elif policy_required:
-                finding["policy_present"] = "Not Found"
             else:
-                finding["policy_present"] = "Not Required"
+                finding["policy_present"] = "Not Found"
 
             if ev_found:
                 finding["evidence_present"] = "Compliant" if evidence_assessment == "COMPLIANT" else "Found"
@@ -2732,12 +2702,15 @@ def post_process(finding, document_text, expected_evidence_map=None, db_chunks=N
             elif _entry:
                 _expected = str(_entry).strip()
 
-            _basis = str(finding.get("final_reason") or finding.get("reasoning") or "").strip()
-            _summary = (_basis[:300].rstrip(". ") + ".") if _basis else ""
-            finding["description"] = (
-                f"Evidence was located and assessed against {cid}, but the automated check could "
-                f"not conclusively confirm every requirement is met. {_summary}"
-            ).strip()
+            _basis = str(finding.get("justification") or finding.get("final_reason") or finding.get("reasoning") or "").strip()
+            if len(_basis) >= 30:
+                finding["description"] = _basis
+            else:
+                _summary = (_basis[:300].rstrip(". ") + ".") if _basis else ""
+                finding["description"] = (
+                    f"Evidence was located and assessed against {cid}, but the automated check could "
+                    f"not conclusively confirm every requirement is met. {_summary}"
+                ).strip()
             finding["gap_description"] = finding["description"]
             finding["finding"] = finding["description"]
             finding["recommendation"] = (
@@ -2838,19 +2811,17 @@ def apply_excel_scoping_safety_gate(
     )
 
     if is_empty_snippet and retrieved_context and retrieved_context.strip():
-        # Extract first meaningful sentence from retrieved_context
-        sentences = re.split(r'(?<=[.!?])\s+', retrieved_context.strip())
-        for s in sentences:
-            s_clean = s.strip()
-            if len(s_clean) > 20:
-                finding["evidence_snippet"] = s_clean[:500]
-                finding["evidence_quote"] = s_clean[:500]
-                print(
-                    f"[SAFETY GATE] Overrode empty evidence_snippet with retrieved context "
-                    f"for locked file '{primary_locked}'.",
-                    flush=True
-                )
-                break
+        # Extract full high-quality evidence paragraph/chunk from retrieved_context
+        clean_ctx = retrieved_context.strip()
+        paragraphs = [p.strip() for p in clean_ctx.split("\n\n") if len(p.strip()) > 20]
+        chosen = paragraphs[0][:800] if paragraphs else clean_ctx[:800]
+        finding["evidence_snippet"] = chosen
+        finding["evidence_quote"] = chosen
+        print(
+            f"[SAFETY GATE] Overrode empty evidence_snippet with high-quality retrieved context chunk "
+            f"for locked file '{primary_locked}'.",
+            flush=True
+        )
 
     # ── Guard 2: Fix wrong source_file (not among the locked filenames) ───────
     # Provenance Preservation: only correct when the cited file is genuinely OUTSIDE

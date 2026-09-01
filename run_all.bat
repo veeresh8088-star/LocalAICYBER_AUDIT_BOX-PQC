@@ -137,9 +137,14 @@ set LLM_NUM_CTX=%MIN_CTX_PER_REQUEST%
 
 
 
+set "MODEL_FILE=%~dp0gemma-4-12B-it-Q8_0.gguf"
+if not exist "%MODEL_FILE%" set "MODEL_FILE=%~dp0gemma-4-12b-it-Q8_0.gguf"
+if not exist "%MODEL_FILE%" set "MODEL_FILE=%~dp0gemma-2-9b-it-Q8_0.gguf"
+if not exist "%MODEL_FILE%" set "MODEL_FILE=%~dp0google_gemma-4-E4B-it-Q4_K_M.gguf"
+
 echo.
-echo [3/6] Starting llama.cpp LLM Server (%PHYSICAL_CORES% Physical Cores -^> %LLM_SLOTS% Slots x %MIN_CTX_PER_REQUEST% tokens = %LLM_TOTAL_CTX% Fluid Shared Pool / 8-bit KV Cache)...
-start "Llama LLM Server" /d "%LLAMA_DIR%" /min "%LLAMA_SERVER_EXE%" --port 11434 -m "%~dp0google_gemma-4-E4B-it-Q4_K_M.gguf" -c %LLM_TOTAL_CTX% -np %LLM_SLOTS% -t %LLM_THREADS% -b 2048 -ub 512 --flash-attn on --cont-batching --kv-unified -ctk q8_0 -ctv q8_0
+echo [3/6] Starting llama.cpp LLM Server (%PHYSICAL_CORES% Physical Cores -> %LLM_SLOTS% Slots x %MIN_CTX_PER_REQUEST% tokens = %LLM_TOTAL_CTX% Fluid Shared Pool / 8-bit KV Cache)...
+start "Llama LLM Server" /d "%LLAMA_DIR%" /min "%LLAMA_SERVER_EXE%" --port 11434 -m "%MODEL_FILE%" -c %LLM_TOTAL_CTX% -np %LLM_SLOTS% -t %LLM_THREADS% -b 2048 -ub 512 --flash-attn on --cont-batching --kv-unified -ctk q8_0 -ctv q8_0
 
 echo.
 echo [4/6] Starting llama.cpp Embedding Server (Port 11435 with %EMBED_THREADS% threads)...

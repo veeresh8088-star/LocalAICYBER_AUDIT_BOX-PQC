@@ -68,24 +68,18 @@ Extract effective/review/expiry dates only when the document states them.
   staleness rule — base it on the control's own requirement or the organization's stated frequency;
   if undetermined, use UNKNOWN, never a guessed period.
 
-## Final result (deterministic — also enforced downstream in code, not just the prompt)
+## Final result (deterministic — enforced downstream in code and prompts)
 
-`FINAL_RESULT = COMPLIANT` when all mandatory atomic requirements of the control/question are
-affirmatively satisfied by grounded evidence:
-- If `policy_required=True`: ALL of `POLICY_STATUS=FOUND` AND `POLICY_ASSESSMENT=COMPLIANT` AND
-  `EVIDENCE_STATUS=FOUND` AND `EVIDENCE_ASSESSMENT=COMPLIANT` AND `POLICY_VALIDITY`/`EVIDENCE_FRESHNESS`
-  acceptable.
-- If `policy_required=False` (operational/technical controls where an approved policy artifact isn't
-  itself the requirement, e.g. purely technical configuration checks): policy absence is NOT a gap and
-  MUST NOT prevent `COMPLIANT` — only grounded operational evidence satisfying the exact requirement is
-  needed. `POLICY_STATUS=NOT_REQUIRED`, `POLICY_ASSESSMENT=NOT_APPLICABLE` in that case.
-- Otherwise `NON_COMPLIANT`. The top-level status should equal `FINAL_RESULT` unless the applicability
-  check set it to `FALSE_POSITIVE`.
+`FINAL_RESULT = COMPLIANT` ONLY when ALL 4 criteria are affirmatively satisfied:
+1. `POLICY_STATUS = FOUND`
+2. `POLICY_ASSESSMENT = COMPLIANT`
+3. `EVIDENCE_STATUS = FOUND`
+4. `EVIDENCE_ASSESSMENT = COMPLIANT`
+(and `POLICY_VALIDITY` / `EVIDENCE_FRESHNESS` are acceptable, with no contradictory evidence).
 
-This formula is not just prompt guidance — it is re-applied deterministically in Python
-(`src/core/validator.py`) after generation, overriding the LLM's own self-reported status if the two
-disagree. A document that reads as strong operational evidence but never states a policy requirement
-(or vice versa) will score NON_COMPLIANT even if the content looks compliant at a glance.
+There are **NO exceptions** for `NOT_REQUIRED` or `NOT_APPLICABLE`. If ANY of policy or evidence is missing (`NOT_FOUND`) or failed (`NON_COMPLIANT`), `FINAL_RESULT` MUST equal `NON_COMPLIANT`.
+
+This formula is re-applied deterministically in Python (`src/core/validator.py`) after generation, overriding the LLM's own self-reported status if the two disagree.
 
 ## Version / numeric threshold comparison
 
@@ -142,3 +136,72 @@ not blindly trust the column label if the content doesn't back it up (see `colum
 
 - **Intent**: Ensure access to facilities, systems, information, and assets is authorized and controlled.
 - If the document demonstrates badge controls, visitor management, escort procedures, access authorization, and physical access restrictions, the control objective may be satisfied even if specific terms such as RBAC, PAM, access request forms, or access recertification are not present — **but only if the document supplies both a policy-side statement (the rule) and a distinct evidence-side artifact (proof it's followed)**. A single paragraph combining a present-tense operational description with the control's stated requirement can satisfy both simultaneously; a document containing only one side satisfies only half the formula.
+
+---
+
+# Project Engineering Rules
+
+## Core rule
+Never guess. Inspect the existing codebase before implementing.
+
+## Architecture
+- Reuse existing services, utilities, API clients and patterns.
+- Do not introduce duplicate implementations.
+- Do not modify unrelated files.
+- Preserve backward compatibility unless explicitly instructed otherwise.
+
+## APIs
+- Never invent API endpoints.
+- Never assume HTTP methods.
+- Inspect existing API clients, route definitions, OpenAPI specs, environment configuration, documentation and tests.
+- Verify endpoint, method, authentication, request schema and response schema before implementation.
+- Never hardcode secrets or environment-specific URLs.
+
+## Database
+- Inspect existing models and migrations before changing schemas.
+- Never silently change existing data contracts.
+- Create migrations when required.
+- Test both existing and new database behavior.
+
+## Frontend
+- Reuse existing components and design system.
+- Do not create duplicate components when an existing component can be reused.
+- Verify loading, error, empty and success states.
+
+## Backend
+- Validate inputs.
+- Preserve existing response contracts.
+- Handle errors explicitly.
+- Add/update tests for changed behavior.
+
+## Implementation workflow
+1. Explore
+2. Plan
+3. Implement
+4. Test
+5. Debug
+6. Re-test
+7. Final verification
+
+## Verification
+A task is NOT complete until:
+- tests pass
+- lint/type checking passes
+- build passes where applicable
+- relevant API endpoints are verified
+- no unrelated functionality is broken
+
+## Mandatory Error Prevention Rules
+1. **Zero Duplicate Declarations**: Never duplicate variable, function, or block-scoped (`let`, `const`) declarations across function blocks or control flows. Always check existing variable scopes before introducing new bindings.
+2. **Mandatory Syntax & Compilation Verification**: Before declaring any change completed:
+   - Run `node --check <file.js>` on all modified JavaScript files.
+   - Run python compilation/syntax checks on all modified Python files.
+3. **No Unintended Side Effects**: Ensure CSS or HTML structural changes do not alter JS logic, variable names, or event handler bindings.
+4. **Automated Test Runner Requirement**: Run relevant automated test suites (e.g. `test_card_layout.py`, `test_scoping_modes.py`, `test_validator_rules.py`) to verify that no existing features or card renderings break.
+5. **Production Build Asset Sync**: Always sync modified `src/api/static/` files (`app.js`, `index.html`, `style.css`) to `dist/AICyberAuditBox/_internal/src/api/static/` and verify integrity.
+
+Never report "completed successfully" without actual verification.
+
+If something cannot be verified, explicitly report:
+`NOT VERIFIED: <reason>`
+

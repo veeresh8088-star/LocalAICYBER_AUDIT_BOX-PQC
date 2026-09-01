@@ -21,8 +21,8 @@ from src.core.parsers.doc_parsers import extract_text
 from src.core.controls_data import USE_CASES
 from src.db.database import SessionLocal, User, AuditTrail, force_master
 
-EVIDENCE_DIR = os.path.join(PROJECT_ROOT, "src", "aa audit evidence samples")
-EXCEL_SCOPING_FILE = os.path.join(EVIDENCE_DIR, "Audit checklist and evidence files.xlsx")
+EVIDENCE_DIR = os.path.join(PROJECT_ROOT, "samples", "audit_evidence")
+EXCEL_SCOPING_FILE = os.path.join(EVIDENCE_DIR, "aa_evidence", "aa audit evidence samples", "Audit checklist and evidence files.xlsx")
 
 EVIDENCE_FILES = [
     "10 -Multi-factor authentication operator.docx",
